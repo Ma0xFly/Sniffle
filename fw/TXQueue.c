@@ -11,7 +11,7 @@
 #define TX_QUEUE_SIZE 8u
 #define TX_QUEUE_MASK (TX_QUEUE_SIZE - 1)
 
-#define PACKET_SIZE 258 // 255 bytes + one header byte for LLID + 2 byte eventCtr
+#define PACKET_SIZE 260 // 255 bytes + one header byte for LLID + 2 byte eventCtr + 2 byte gateAt
 
 static uint8_t packet_buf[PACKET_SIZE*TX_QUEUE_SIZE];
 static rfc_dataEntryPointer_t queue_entries[TX_QUEUE_SIZE];
@@ -41,7 +41,10 @@ void TXQueue_init()
 
 // only call this from a single thread (ie. CommandTask)
 // return true for success
-bool TXQueue_insert(uint8_t len, uint8_t llid, void *data, uint16_t eventCtr)
+// gateAt: connection event counter at (or after) which the PDU may be
+// transmitted; 0 for no gating
+bool TXQueue_insert(uint8_t len, uint8_t llid, void *data, uint16_t eventCtr,
+        uint16_t gateAt)
 {
     // bail if we're full
     if ( ((queue_head - queue_tail) & TX_QUEUE_MASK) == TX_QUEUE_MASK )
@@ -59,8 +62,9 @@ bool TXQueue_insert(uint8_t len, uint8_t llid, void *data, uint16_t eventCtr)
     *pData = llid & 0x3; // mask out header bits radio core will handle
     memcpy(pData + 1, data, len);
 
-    // stuff in eventCtr after the PDU body, radio will ignore
+    // stuff in eventCtr and gateAt after the PDU body, radio will ignore
     memcpy(pData + len + 1, &eventCtr, sizeof(eventCtr));
+    memcpy(pData + len + 3, &gateAt, sizeof(gateAt));
 
     // only increment once entry is complete and ready
     // wraparound is safe due to our masking
@@ -91,6 +95,41 @@ uint32_t TXQueue_take(dataQueue_t *pRFQueue)
     }
 
     return qsize;
+}
+
+// like TXQueue_take, but holds back queued PDUs until the connection event
+// counter reaches their gateAt time (0 means never held back)
+// only call this from a single thread (ie. RadioTask)
+uint32_t TXQueue_take_at(dataQueue_t *pRFQueue, uint16_t curEvent)
+{
+    uint32_t h = queue_head;
+    uint32_t t = queue_tail;
+    uint32_t qsize = (h - t) & TX_QUEUE_MASK;
+
+    // take the longest FIFO prefix eligible at curEvent
+    uint32_t eligible = 0;
+    for (uint32_t i = 0; i < qsize; i++)
+    {
+        rfc_dataEntryPointer_t *entry = &queue_entries[(t + i) & TX_QUEUE_MASK];
+        uint16_t gateAt;
+        memcpy(&gateAt, entry->pData + entry->length + 2, sizeof(gateAt));
+        if (gateAt != 0 && gateAt > curEvent)
+            break;
+        eligible++;
+    }
+
+    if (eligible)
+    {
+        uint32_t first = t & TX_QUEUE_MASK;
+        uint32_t last = (t + eligible - 1) & TX_QUEUE_MASK;
+        pRFQueue->pCurrEntry = (uint8_t *)(queue_entries + first);
+        pRFQueue->pLastEntry = (uint8_t *)(queue_entries + last);
+    } else {
+        pRFQueue->pCurrEntry = NULL;
+        pRFQueue->pLastEntry = NULL;
+    }
+
+    return eligible;
 }
 
 // release entries taken from the queue

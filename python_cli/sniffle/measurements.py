@@ -13,6 +13,7 @@ class MeasurementType(IntEnum):
     WINOFFSET = 3
     DELTAINSTANT = 4
     VERSION = 5
+    TERMINATE = 6
 
 class MeasurementMessage:
     def __init__(self, raw_msg):
@@ -23,7 +24,7 @@ class MeasurementMessage:
 
     @staticmethod
     def from_raw(raw_msg):
-        if len(raw_msg) < 2 or raw_msg[1] > MeasurementType.VERSION:
+        if len(raw_msg) < 2 or raw_msg[1] > MeasurementType.TERMINATE:
             return MeasurementMessage(raw_msg)
 
         if len(raw_msg) - 1 != raw_msg[0]:
@@ -35,7 +36,8 @@ class MeasurementMessage:
             MeasurementType.ADVHOP:         AdvHopMeasurement,
             MeasurementType.WINOFFSET:      WinOffsetMeasurement,
             MeasurementType.DELTAINSTANT:   DeltaInstantMeasurement,
-            MeasurementType.VERSION:        VersionMeasurement
+            MeasurementType.VERSION:         VersionMeasurement,
+            MeasurementType.TERMINATE:       TerminateMeasurement
             }
 
         mtype = MeasurementType(raw_msg[1])
@@ -90,3 +92,10 @@ class VersionMeasurement(MeasurementMessage):
     def __str__(self):
         return "Sniffle Firmware %d.%d.%d, API Level %d" % (
                 self.major, self.minor, self.revision, self.api_level)
+
+class TerminateMeasurement(MeasurementMessage):
+    def __init__(self, raw_val):
+        self.value = raw_val[0]
+
+    def __str__(self):
+        return "LL Terminate Reason: 0x%02X" % self.value

@@ -30,7 +30,8 @@ enum MeasurementTypes
     MEASTYPE_ADVHOP,
     MEASTYPE_WINOFFSET,
     MEASTYPE_DELTAINSTANT,
-    MEASTYPE_VERSION
+    MEASTYPE_VERSION,
+    MEASTYPE_TERMINATE
 };
 
 void reportMeasInterval(uint16_t interval)
@@ -94,9 +95,20 @@ void reportVersion()
 
     buf[0] = MEASTYPE_VERSION;
     buf[1] = 1; // major version
-    buf[2] = 11; // minor version
+    buf[2] = 12; // minor version
     buf[3] = 0; // revision
     buf[4] = 0; // API level
+
+    reportMeasurement(buf, sizeof(buf));
+}
+
+// reason code from LL_TERMINATE_IND, for the host's crash oracle
+void reportMeasTerminate(uint8_t reason)
+{
+    uint8_t buf[2];
+
+    buf[0] = MEASTYPE_TERMINATE;
+    buf[1] = reason;
 
     reportMeasurement(buf, sizeof(buf));
 }

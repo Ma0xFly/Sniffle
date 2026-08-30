@@ -27,7 +27,12 @@
 /* TX Configuration: */
 #define DATA_ENTRY_HEADER_SIZE 8    /* Constant header size of a Generic Data Entry */
 #define MAX_LENGTH             257  /* Max 8-bit length + two byte BLE header */
-#define NUM_DATA_ENTRIES       2    /* NOTE: Only two data entries supported at the moment */
+/* att-fuzz patch #4: was 2 ("only two supported at the moment" per the TI
+ * demo this came from). In busy RF environments (dozens of adv/s on the
+ * advertising channel), 2 entries overflow (BLE_ERROR_RXOVF 0x1805), which
+ * kills the Ble5Initiator command mid-attempt. 8 gives the radio core
+ * headroom; entry recycling logic (RFQueue_nextEntry) already handles N. */
+#define NUM_DATA_ENTRIES       8
 #define NUM_APPENDED_BYTES     7    /* Appended RSSI, appended status word, appended 4 byte timestamp*/
 
 /*********************************************************************
@@ -688,7 +693,7 @@ int RadioWrapper_initiate(PHY_Mode phy, uint32_t chan, uint32_t timeout, bool fo
     RF_cmdBle5Initiator.pParams->pWhiteList = (rfc_bleWhiteListEntry_t *)peerAddr;
 
     RF_cmdBle5Initiator.pParams->connectTime = RF_getCurrentTime() + 4000;
-    RF_cmdBle5Initiator.pParams->maxWaitTimeForAuxCh = 0xFFFF; // units?
+    RF_cmdBle5Initiator.pParams->maxWaitTimeForAuxCh = 0xFFFF;
 
     if (forever)
     {
@@ -728,10 +733,16 @@ int RadioWrapper_initiate(PHY_Mode phy, uint32_t chan, uint32_t timeout, bool fo
     case BLE_DONE_RXTIMEOUT:
     case BLE_DONE_ENDED:
     case BLE_DONE_STOPPED:
+        dprintf("Initiator status: 0x%04X (auxWait=%u rxListen=%u)",
+                RF_cmdBle5Initiator.status,
+                RF_cmdBle5Initiator.pParams->maxWaitTimeForAuxCh,
+                RF_cmdBle5Initiator.pParams->rxListenTime);
         return -1;
     case BLE_DONE_NOSYNC:
+        dprintf("Initiator status: 0x%04X (NOSYNC)", RF_cmdBle5Initiator.status);
         return -2;
     default:
+        dprintf("Initiator status: 0x%04X", RF_cmdBle5Initiator.status);
         return -3;
     }
 }

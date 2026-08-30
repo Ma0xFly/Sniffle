@@ -458,7 +458,13 @@ static void radioTaskFunction(UArg arg0, UArg arg1)
             if (snifferState != INITIATING)
                 continue; // initiating state was cancelled
             if (status < 0) {
-                handleConnFinished();
+                /* att-fuzz patch #3: retry the initiator while in INITIATING.
+                 * In busy RF environments the command dies young -- STOPPED via
+                 * the sniffer's own aux stop trigger, or RXERR from chasing
+                 * foreign address-less ADV_EXT_IND aux pointers. Each attempt
+                 * is short (~1s), so keep retrying; the host bounds the wait.
+                 * Task_sleep unit = 1 tick = 1 ms. */
+                Task_sleep(10); // 10 ms yield for equal-priority tasks
                 continue;
             }
 
@@ -473,7 +479,7 @@ static void radioTaskFunction(UArg arg0, UArg arg1)
             uint32_t numSent = 0;
             uint8_t chan = getCurrChan();
             int status = 0;
-            TXQueue_take(&txq);
+            TXQueue_take_at(&txq, connEventCount & 0xFFFF);
             txq2 = txq; // copy the queue since TX will update current entry pointer
             firstPacket = false; // no need for anchor offset calcs, since we're central
             g_pkt_dir = 1;
@@ -533,7 +539,7 @@ static void radioTaskFunction(UArg arg0, UArg arg1)
             uint32_t numSent;
             uint32_t timeExtension = rconf.winOffsetCertain ? 0 : rconf.hopIntervalTicks;
             uint8_t chan = getCurrChan();
-            TXQueue_take(&txq);
+            TXQueue_take_at(&txq, connEventCount & 0xFFFF);
             txq2 = txq; // copy the queue since TX will update current entry pointer
             firstPacket = true; // for anchor offset calculations
 
@@ -1067,6 +1073,7 @@ static void reactToDataPDU(const BLE_Frame *frame, bool transmit)
         break;
     case 0x02: // LL_TERMINATE_IND
         if (datLen != 2) break;
+        reportMeasTerminate(frame->pData[3]); // reason code, for the host's crash oracle
         handleConnFinished();
         break;
     case 0x05: // LL_START_ENC_REQ

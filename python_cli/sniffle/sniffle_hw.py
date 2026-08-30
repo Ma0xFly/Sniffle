@@ -195,6 +195,19 @@ class SniffleHW:
             raise ValueError("Out of bounds event counter")
         self._send_cmd([0x19, event & 0xFF, event >> 8, llid, len(pdu), *pdu])
 
+    # Provide a PDU to transmit at a specific connection event, when in central
+    # or peripheral modes. The PDU is held in the firmware TX queue until the
+    # connection event counter reaches the specified event. Requires patched
+    # firmware (1.12.0+); stock firmware treats this like cmd_transmit ASAP.
+    def cmd_transmit_at(self, llid, pdu, event):
+        if not (0 <= llid <= 3):
+            raise ValueError("Out of bounds LLID")
+        if len(pdu) > 255:
+            raise ValueError("Too long PDU")
+        if not (0 <= event <= 0xFFFF):
+            raise ValueError("Out of bounds event counter")
+        self._send_cmd([0x28, event & 0xFF, event >> 8, llid, len(pdu), *pdu])
+
     # Initiate a connection by transmitting a CONNECT_IND PDU to the specified peer,
     # then transitioning to a connected central state
     def cmd_connect(self, peerAddr, llData, is_random=True):

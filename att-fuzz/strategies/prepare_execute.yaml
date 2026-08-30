@@ -64,3 +64,24 @@
     - {op: execute_write_req, flags: 1, observe: 0.2}
     - {op: read_req, handle: "${each.value}"}
   filter: writable
+
+# --- 冻结猎取:实测发现"队列打满后特定 handle 的 Prepare 三连超时 + post-HC 超时"
+# (= 阶段一 ATT 冻结签名)。验证"队列满 + 后续操作 → 冻结"假设:
+# 灌满队列 → known-good 读探针(冻结则超时,否则 OK) → 取消 → 再探针。 ---
+- id: pe-hunt-fill-probe
+  layer: prepare-execute
+  steps:
+    - {op: prepare_write_req, handle: "${wvalue}", offset: 0,
+       value: {len: 4, pattern: incremental}, repeat: 30, observe: 0.02}
+    - {op: read_req, handle: "${value}", observe: 1.0}
+    - {op: execute_write_req, flags: 0, observe: 1.0}
+    - {op: read_req, handle: "${value}", observe: 1.0}
+
+# 超量灌包(32 条,越过观测到的 ~28 深度)后立即提交,提交后读探针 ---
+- id: pe-hunt-fill-commit
+  layer: prepare-execute
+  steps:
+    - {op: prepare_write_req, handle: "${wvalue}", offset: 0,
+       value: {len: 4, pattern: incremental}, repeat: 32, observe: 0.02}
+    - {op: execute_write_req, flags: 1, observe: 1.0}
+    - {op: read_req, handle: "${value}", observe: 1.0}

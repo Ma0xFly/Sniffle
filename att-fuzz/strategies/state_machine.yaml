@@ -1,0 +1,104 @@
+# ⑤ 状态机违规:MTU 协商滥用 + 未协商 MTU 即读写(SweynTooth 非时序类)
+# 序列用例格式与 no_mtu_negotiate 语义见同目录 README.md。
+# 注意:no_mtu_negotiate 用例集中放在文件末尾,避免协商状态来回切换产生多余重连。
+
+# --- Exchange MTU 值集(正常连接上单发怪值/边界值) ---
+- id: sm-mtu-min
+  layer: state-machine
+  op: exchange_mtu_req
+  mtu: 23              # 协商回最小值(shrink)
+
+- id: sm-mtu-24
+  layer: state-machine
+  op: exchange_mtu_req
+  mtu: 24
+
+- id: sm-mtu-251
+  layer: state-machine
+  op: exchange_mtu_req
+  mtu: 251             # 小于会话协商值(512)的合法上界
+
+- id: sm-mtu-zero
+  layer: state-machine
+  op: exchange_mtu_req
+  mtu: 0               # 0x0000,非法
+
+- id: sm-mtu-ffff
+  layer: state-machine
+  op: exchange_mtu_req
+  mtu: 0xFFFF          # 0xFFFF,非法
+
+- id: sm-mtu-1
+  layer: state-machine
+  op: exchange_mtu_req
+  mtu: 1               # <23,规范要求回 Error(Request Not Supported)
+
+- id: sm-mtu-22
+  layer: state-machine
+  op: exchange_mtu_req
+  mtu: 22
+
+# --- 重复/反向协商(规范:一条连接只允许一次 Exchange MTU) ---
+- id: sm-mtu-reneg-2x
+  layer: state-machine
+  steps:
+    - {op: exchange_mtu_req, mtu: 517}
+    - {op: exchange_mtu_req, mtu: 517}
+
+- id: sm-mtu-reneg-3x
+  layer: state-machine
+  steps:
+    - {op: exchange_mtu_req, mtu: 517}
+    - {op: exchange_mtu_req, mtu: 517}
+    - {op: exchange_mtu_req, mtu: 517, observe: 0.5}
+
+- id: sm-mtu-shrink-seq
+  layer: state-machine
+  steps:
+    - {op: exchange_mtu_req, mtu: 517}
+    - {op: exchange_mtu_req, mtu: 23}
+
+- id: sm-mtu-zero-seq
+  layer: state-machine
+  steps:
+    - {op: exchange_mtu_req, mtu: 517}
+    - {op: exchange_mtu_req, mtu: 0, observe: 0.5}
+
+- id: sm-mtu-ffff-seq
+  layer: state-machine
+  steps:
+    - {op: exchange_mtu_req, mtu: 517}
+    - {op: exchange_mtu_req, mtu: 0xFFFF}
+
+# --- 未协商 MTU 即读写(需要 no_mtu_negotiate;连接后不自动 DLE+MTU,直接以 MTU=23 态发) ---
+- id: sm-noneneg-read            # 合法基线对照:MTU=23 读
+  layer: state-machine
+  no_mtu_negotiate: true
+  op: read_req
+  handle: "${value}"
+  filter: readable
+
+- id: sm-noneneg-blob-long       # 未协商即按"以为 MTU 很大"发 Read Blob
+  layer: state-machine
+  no_mtu_negotiate: true
+  op: read_blob_req
+  handle: "${value}"
+  offset: 0
+  filter: readable
+
+- id: sm-noneneg-write-long      # 未协商即发超 MTU-3(20B)的写:预期拒绝或忽略
+  layer: state-machine
+  no_mtu_negotiate: true
+  op: write_req
+  handle: "${each.value}"
+  value: {len: 40, pattern: incremental}
+  filter: writable
+
+- id: sm-noneneg-write-long-seq  # 序列:合法短写 -> 超长写 -> 回读验证
+  layer: state-machine
+  no_mtu_negotiate: true
+  steps:
+    - {op: write_req, handle: "${each.value}", value: {len: 4, pattern: incremental}}
+    - {op: write_req, handle: "${each.value}", value: {len: 40, pattern: incremental}}
+    - {op: read_req, handle: "${each.value}", observe: 0.5}
+  filter: writable

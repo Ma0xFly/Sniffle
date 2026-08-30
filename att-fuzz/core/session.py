@@ -378,12 +378,19 @@ class FuzzSession:
                 if self.negotiate:
                     self.t.setup_data_size()
                 fresh = discover(self.t, baseline=False)
-                if self.gatt is not None and \
+                if fresh.gaps:
+                    # 发现不完整(目标恢复期常见):残缺地图会误报 "GATT changed",
+                    # 把完好缓存换成残缺版,污染后续健康归因 -- 保留缓存,下轮再核
+                    log.info("recovery discovery incomplete (%d gaps), keep cached map",
+                             len(fresh.gaps))
+                elif self.gatt is not None and \
                         [(s.start_handle, s.end_handle, s.uuid) for s in fresh.services] != \
                         [(s.start_handle, s.end_handle, s.uuid) for s in self.gatt.services]:
                     if self.rediscover_on_mismatch:
                         log.info("GATT changed after crash, rediscovering")
                         self.gatt = self._discover_and_save()
+                elif self.gatt is None:
+                    self.gatt = self._discover_and_save()
                 return self.health_check()
             except (TransportError, LinkDrop) as e:
                 log.warning("reconnect attempt %d failed: %s", attempt, e)

@@ -123,7 +123,7 @@ class FuzzController:
             self._teardown()
 
     def _teardown(self):
-        """每次任务结束必调:断链、关串口、复位事件桥。
+        """每次任务结束必调:断链、关 pcap、关串口、复位事件桥。
         不清理的话旧串口句柄泄漏,下一次运行在同端口上开第二个句柄,
         固件/串口状态会错乱(实测第二次任务必挂)。"""
         t = self._transport
@@ -136,6 +136,12 @@ class FuzzController:
                     time.sleep(1.2)
             except Exception:
                 pass
+            pcap = getattr(t, "pcap", None)
+            if pcap is not None:
+                try:
+                    pcap.output.close()   # PcapBleWriter 无 close(),句柄在 .output
+                except Exception:
+                    pass
             try:
                 t.hw.ser.close()
             except Exception:
@@ -154,7 +160,7 @@ class FuzzController:
         jsonl_path = (outdir / "transport.jsonl") if outdir else None
         if demo:
             hw = _make_fake_hw()()
-            transport = SniffleTransport(hw, pcap=None,
+            transport = SniffleTransport(hw, pcap=_make_pcap(outdir),
                                          jsonl_path=jsonl_path,
                                          conn_interval_units=target.get("conn_interval", 12))
             state.conn["fw_version"] = "演示模式(FakeHw)"
@@ -173,7 +179,7 @@ class FuzzController:
             try:
                 transport = SniffleTransport(
                         _make_hw(serport or target.get("serport")),  # noqa: 延迟构造见 _make_hw
-                        pcap=None, jsonl_path=jsonl_path,
+                        pcap=_make_pcap(outdir), jsonl_path=jsonl_path,
                         conn_interval_units=target.get("conn_interval", 12))
             except Exception as e:
                 raise TransportError(
@@ -363,6 +369,14 @@ class FuzzController:
 def _make_hw(serport):
     from sniffle.sniffle_hw import SniffleHW
     return SniffleHW(serport=serport)
+
+
+def _make_pcap(outdir):
+    """outdir 给定时配 pcap 双录(对齐 CLI 角色层);probe(outdir=None)无 pcap。"""
+    if not outdir:
+        return None
+    from sniffle.pcap import PcapBleWriter
+    return PcapBleWriter(str(Path(outdir) / "capture.pcap"))
 
 
 def _make_fake_hw():

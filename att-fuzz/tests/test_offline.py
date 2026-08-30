@@ -127,6 +127,9 @@ seq_raw = [
      "steps": [{"op": "write_cmd", "handle": "${each.value}",
                 "value": {"len": 4, "pattern": "incremental"}},
                {"op": "read_req", "handle": "${each.value}"}]},
+    {"id": "sm-seq-repeat", "layer": "prepare-execute",
+     "steps": [{"op": "prepare_write_req", "handle": "${wvalue}", "offset": 0,
+                "value": {"len": 4, "pattern": "incremental"}, "repeat": 5}]},
 ]
 seq_cases = expand(seq_raw, m, mtu=247, seed=9)
 by_id = {}
@@ -149,6 +152,12 @@ assert wcmd[0].steps[0].expect_response is False      # write_cmd 推断
 assert wcmd[0].steps[0].pdu[0] == 0x52
 assert len(wcmd[0].steps[0].pdu) == 3 + 4
 assert wcmd[0].steps[1].expect_response is True and wcmd[0].steps[1].pdu[0] == 0x0A
+
+# repeat: N 拍平为 N 个同构步;wvalue = 首个可写特征(fixture: 0x0003)
+rep = by_id["sm-seq-repeat"][0]
+assert len(rep.steps) == 5 and all(s.pdu == rep.steps[0].pdu for s in rep.steps)
+assert rep.steps[0].pdu[0] == 0x16 and rep.steps[0].pdu[1] == 0x03
+assert rep.meta["ops"] == ["prepare_write_req"] * 5
 # 单 PDU 用例的统一视图
 single = expand([{"id": "x-read", "layer": "handle", "op": "read_req",
                   "handle": "${each.value}", "filter": "readable"}],

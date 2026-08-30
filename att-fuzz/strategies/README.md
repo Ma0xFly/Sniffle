@@ -14,7 +14,8 @@
 ```
 
 - 表达式:`${var}`、`${var+N}`、`${var-N}`、`${var*N}`;变量见 `_char_vars`/`_global_vars`
-  (`value`/`decl`/`cccd`/`baseline_len`/`mtu`,each 形式为 `each.*`)。
+  (`value`/`wvalue`/`decl`/`cccd`/`baseline_len`/`mtu`,each 形式为 `each.*`;
+  `value`=known-good 锚点,`wvalue`=首个可写特征值句柄——缓冲/灌包类用例锚点)。
 - `value: {len, pattern}` 支持 zero/ff/incremental/random/fmtstring/ascii,
   random 由 `seed+case_id` 驱动,确定性可复现。
 - 去重:PDU 字节相同的用例只保留首条(对目标等价,白烧连接不值得)。
@@ -36,7 +37,8 @@
 - 每步字段与单 PDU 模板同构(`op` + 构造参数,或 `payload: "<hex>"` 裸字节步)。
 - 步级可选字段:
   - `expect_response`: 默认按 op 推断(write_cmd → false,其余 true);
-  - `observe`: 步间观察窗(秒),收到本步响应后等待再走下一步,给迟滞留时间。
+  - `observe`: 步间观察窗(秒),收到本步响应后等待再走下一步,给迟滞留时间;
+  - `repeat: N`: 本步展开为 N 个同构步(flood 类用例靠序列节奏,不绕过发端限速)。
 - `${each.*}` 可用在任意步的字段里;case 级 `filter` 决定锚点特征范围。
 - 展开与去重:整条序列一起展开;全步 PDU 组合相同的序列才判重。
 - `no_mtu_negotiate: true` 同样适用于序列用例(整条序列都在未协商链路上)。

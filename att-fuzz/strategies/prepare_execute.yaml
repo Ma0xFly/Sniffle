@@ -1,0 +1,66 @@
+# ⑥ Prepare/Execute 双阶段缓冲:队列泄漏、灌包、乱序、取消、空提交、非法 flags
+# 合规基线:0x09 Prepare Queue Full 属规范内防御——"从第几条开始拒"即队列深度的
+# 黑盒测量(flood 序列逐步记录可直接读出)。步 repeat 语法见 strategies/README.md。
+
+# --- 队列泄漏:单条 Prepare(offset=0)不 Execute,连接存续期/断连时观察 ---
+- id: pe-prep-leak
+  layer: prepare-execute
+  op: prepare_write_req
+  handle: "${each.value}"
+  offset: 0
+  value: {len: 4, pattern: incremental}
+  filter: writable
+
+# --- 空队列提交(0x01)/非法 flags:无 Prepare 直接 Execute ---
+- id: pe-exec-empty
+  layer: prepare-execute
+  op: execute_write_req
+  flags: 1
+
+- id: pe-exec-flag-2
+  layer: prepare-execute
+  op: execute_write_req
+  flags: 2
+
+- id: pe-exec-flag-ff
+  layer: prepare-execute
+  op: execute_write_req
+  flags: 0xFF
+
+# --- 灌包:连续 30 条合法 Prepare 不 Execute → 队列深度黑盒测量 ---
+- id: pe-flood-30-noexec
+  layer: prepare-execute
+  steps:
+    - {op: prepare_write_req, handle: "${wvalue}", offset: 0,
+       value: {len: 4, pattern: incremental}, repeat: 30, observe: 0.05}
+
+# --- 乱序 offset 灌包 → 提交 → 回读 ---
+- id: pe-flood-shuffle-exec
+  layer: prepare-execute
+  steps:
+    - {op: prepare_write_req, handle: "${wvalue}", offset: 0,   value: {len: 4, pattern: incremental}}
+    - {op: prepare_write_req, handle: "${wvalue}", offset: 512, value: {len: 4, pattern: incremental}}
+    - {op: prepare_write_req, handle: "${wvalue}", offset: 0,   value: {len: 8, pattern: incremental}}
+    - {op: prepare_write_req, handle: "${wvalue}", offset: 256, value: {len: 4, pattern: incremental}}
+    - {op: prepare_write_req, handle: "${wvalue}", offset: 128, value: {len: 2, pattern: ff}}
+    - {op: prepare_write_req, handle: "${wvalue}", offset: 512, value: {len: 2, pattern: ff}}
+    - {op: execute_write_req, flags: 1, observe: 0.3}
+    - {op: read_req, handle: "${wvalue}"}
+
+# --- 取消提交后回读(状态残留观察) ---
+- id: pe-cancel-read
+  layer: prepare-execute
+  steps:
+    - {op: prepare_write_req, handle: "${each.value}", offset: 0, value: {len: 4, pattern: incremental}}
+    - {op: execute_write_req, flags: 0, observe: 0.2}
+    - {op: read_req, handle: "${each.value}"}
+  filter: writable
+
+# --- 提交后回读(合法路径对照) ---
+- id: pe-commit-read
+  layer: prepare-execute
+  steps:
+    - {op: prepare_write_req, handle: "${each.value}", offset: 0, value: {len: 4, pattern: incremental}}
+    - {op: execute_write_req, flags: 1, observe: 0.2}
+    - {op: read_req, handle: "${each.value}"}
+  filter: writable

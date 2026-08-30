@@ -162,9 +162,14 @@ def _char_vars(c: Characteristic, gatt: GattMap, mtu: int) -> dict:
 
 
 def _global_vars(gatt: GattMap, mtu: int, anchor_value_handle: int | None) -> dict:
+    fallback = anchor_value_handle or (gatt.value_handles()[0] if gatt.value_handles() else 1)
+    wvalue = next((c.value_handle for c in gatt.characteristics
+                   if c.has_prop(Characteristic.PROP_WRITE) or
+                   c.has_prop(Characteristic.PROP_WRITE_NO_RSP)), fallback)
     return {
         "mtu": mtu,
         "value": anchor_value_handle or (gatt.value_handles()[0] if gatt.value_handles() else 1),
+        "wvalue": wvalue,    # 首个可写特征值句柄(灌包/缓冲类用例锚点)
     }
 
 
@@ -190,6 +195,18 @@ def _build_step(step_raw: dict, v: dict, seed, case_id: str, idx: int) -> CaseSt
     observe = float(step_raw.get("observe", 0) or 0)
     return CaseStep(pdu=pdu, expect_response=bool(expect), observe=observe,
                     op=op or "raw")
+
+
+def _flatten_steps(raw_steps: list) -> list:
+    """把步定义拍平:repeat: N 展开为 N 个同构步(flood 类用例靠序列节奏,
+    不绕过发端限速)。repeat < 1 视为模板错误。"""
+    out = []
+    for s in raw_steps:
+        n = int(s.get("repeat", 1) or 1)
+        if n < 1:
+            raise ValueError("step repeat must be >= 1: %r" % s)
+        out.extend([s] * n)
+    return out
 
 
 def _step_needs_each(step_raw: dict) -> bool:
@@ -246,7 +263,7 @@ def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
                     cid = "%s@%04x" % (rid, anchor.value_handle)
                 try:
                     steps = [_build_step(s, v, seed, cid, i)
-                             for i, s in enumerate(raw["steps"])]
+                             for i, s in enumerate(_flatten_steps(raw["steps"]))]
                 except ValueError:
                     continue        # 该特征不适用,静默跳过
                 meta = {"seq": True, "ops": [s.op for s in steps],

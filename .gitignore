@@ -1,0 +1,22 @@
+# APM / local tooling
+.apm/
+.zcode/
+zcode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime artifacts & logs
+att-fuzz/logs/
+logs/
+
+# Prebuilt binaries / firmware build artifacts
+*.hex
+fw/*.obj
+fw/*.out
+fw/*.map
+fw/*.zip
+fw/ti_drivers_config.*
+fw/ti_sysbios_config.*
+fw/ti_utils_build_linker.cmd.*

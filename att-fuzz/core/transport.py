@@ -210,7 +210,12 @@ class SniffleTransport:
         while time.monotonic() < deadline:
             if not self._select_ready(deadline):
                 continue
-            msg = self.hw.recv_and_decode()
+            try:
+                msg = self.hw.recv_and_decode()
+            except Exception as e:
+                # 空口残包会让上游解码器抛错(probe 常态),跳过该包继续扫
+                log.debug("probe decode error: %s", e)
+                continue
             if isinstance(msg, (AdvIndMessage, ScanRspMessage)) and msg.AdvA is not None:
                 # MAC 过滤下收到的都是目标
                 return {
@@ -238,7 +243,11 @@ class SniffleTransport:
         while time.monotonic() < deadline:
             if not self._select_ready(deadline):
                 continue
-            msg = self.hw.recv_and_decode()
+            try:
+                msg = self.hw.recv_and_decode()
+            except Exception as e:
+                log.debug("scan decode error: %s", e)
+                continue
             if isinstance(msg, (AdvIndMessage, ScanRspMessage)) and msg.AdvA is not None:
                 if s in msg.body:
                     mac = bytes(msg.AdvA)
@@ -341,7 +350,13 @@ class SniffleTransport:
         while time.monotonic() < deadline:
             if not self._select_ready(deadline):
                 continue
-            msg = self.hw.recv_and_decode()
+            try:
+                msg = self.hw.recv_and_decode()
+            except Exception as e:
+                # 空口残包会让上游解码器抛错(实测截断广播包打死整个连接流程),
+                # 跳过该包继续等 CENTRAL
+                log.debug("connect decode error: %s", e)
+                continue
             if msg is not None:
                 if isinstance(msg, StateMessage):
                     log.debug("connect: STATE %s from %s", msg.new_state.name,

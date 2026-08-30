@@ -378,11 +378,12 @@ class FuzzSession:
                 if self.negotiate:
                     self.t.setup_data_size()
                 fresh = discover(self.t, baseline=False)
-                if fresh.gaps:
-                    # 发现不完整(目标恢复期常见):残缺地图会误报 "GATT changed",
+                if fresh.gaps or (self.gatt is not None and
+                                  self.gatt.services and not fresh.services):
+                    # 发现不完整/空(目标恢复期常见):残缺地图会误报 "GATT changed",
                     # 把完好缓存换成残缺版,污染后续健康归因 -- 保留缓存,下轮再核
-                    log.info("recovery discovery incomplete (%d gaps), keep cached map",
-                             len(fresh.gaps))
+                    log.info("recovery discovery incomplete (%d gaps, %d services), "
+                             "keep cached map", len(fresh.gaps), len(fresh.services))
                 elif self.gatt is not None and \
                         [(s.start_handle, s.end_handle, s.uuid) for s in fresh.services] != \
                         [(s.start_handle, s.end_handle, s.uuid) for s in self.gatt.services]:

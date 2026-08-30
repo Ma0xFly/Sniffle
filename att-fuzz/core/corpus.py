@@ -74,16 +74,35 @@ def eval_expr(expr, variables: dict):
 
 
 @dataclass
+class CaseStep:
+    """序列用例的单步。pdu 已按锚点构造;op 仅为台账可读性记录。"""
+    pdu: bytes
+    expect_response: bool = True
+    observe: float = 0.0        # 步间观察窗(秒):等潜在迟滞显现再走下一步
+    op: str | None = None
+
+
+@dataclass
 class Case:
     """展开后的具体用例"""
     id: str
     layer: str
-    pdu: bytes
+    pdu: bytes | None = None            # 单 PDU 用例(既有格式)
+    steps: list | None = None           # 序列用例: list[CaseStep];与 pdu 互斥
     expect_response: bool = True
     meta: dict = field(default_factory=dict)
 
+    def all_steps(self) -> list:
+        """统一视图:单 PDU 用例视作单步序列。"""
+        if self.steps is not None:
+            return self.steps
+        return [CaseStep(pdu=self.pdu, expect_response=self.expect_response,
+                         op=self.meta.get("op"))]
+
     def __repr__(self):
-        return "Case(%s, %s, %s)" % (self.id, self.layer, self.pdu[:8].hex())
+        if self.steps is not None:
+            return "Case(%s, %s, %d steps)" % (self.id, self.layer, len(self.steps))
+        return "Case(%s, %s, %s)" % (self.id, self.layer, (self.pdu or b"")[:8].hex())
 
 
 # 每种 op 对应的构造器:(case, variables) -> bytes
@@ -153,6 +172,35 @@ def _is_each(expr) -> bool:
     return isinstance(expr, str) and "each" in expr
 
 
+def _build_step(step_raw: dict, v: dict, seed, case_id: str, idx: int) -> CaseStep:
+    """构造序列的某一步。字段与单 PDU 模板同构(op/handle/value/...),
+    另支持 expect_response(默认按 op 推断:write_cmd 无响应)、
+    observe(步间观察窗秒)、payload(无 op 的裸字节步,hex)。"""
+    step_raw = dict(step_raw)
+    # random pattern 的确定性种子:按步区分,同 seed 同结果
+    step_raw["id"] = "%s#s%d" % (case_id, idx)
+    op = step_raw.get("op")
+    if op is None:
+        pdu = bytes.fromhex(step_raw["payload"])
+    else:
+        pdu = _build_pdu(step_raw, v, seed)
+    expect = step_raw.get("expect_response")
+    if expect is None:
+        expect = op != "write_cmd"
+    observe = float(step_raw.get("observe", 0) or 0)
+    return CaseStep(pdu=pdu, expect_response=bool(expect), observe=observe,
+                    op=op or "raw")
+
+
+def _step_needs_each(step_raw: dict) -> bool:
+    fields = {k: step_raw.get(k) for k in ("handle", "offset", "start", "end",
+                                           "mtu", "uuid")}
+    value_spec = step_raw.get("value")
+    return any(_is_each(fv) for fv in fields.values()) or \
+            (isinstance(value_spec, dict) and
+             (_is_each(value_spec.get("len")) or _is_each(value_spec.get("handle"))))
+
+
 def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
           per_anchor_cap: int | None = None) -> list:
     """把 YAML 原始用例展开为具体 Case 列表。
@@ -173,6 +221,46 @@ def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
             out.append(Case(id=rid, layer=layer, pdu=pdu, meta={"raw": True}))
             continue
 
+        # 序列用例:steps 列表,每步同单 PDU 模板字段(见 strategies/README.md)
+        if "steps" in raw:
+            no_neg = bool(raw.get("no_mtu_negotiate", False))
+            req_filter = raw.get("filter")
+            templates = [None]
+            if any(_step_needs_each(s) for s in raw["steps"]):
+                templates = chars
+            count = 0
+            for anchor in templates:
+                if anchor is None:
+                    v = dict(gvars)
+                    cid = rid
+                else:
+                    if req_filter == "writable" and not (
+                            anchor.has_prop(Characteristic.PROP_WRITE) or
+                            anchor.has_prop(Characteristic.PROP_WRITE_NO_RSP)):
+                        continue
+                    if req_filter == "readable" and \
+                            not anchor.has_prop(Characteristic.PROP_READ):
+                        continue
+                    v = _char_vars(anchor, gatt, mtu)
+                    v.update({k: gvars[k] for k in gvars if k not in v})
+                    cid = "%s@%04x" % (rid, anchor.value_handle)
+                try:
+                    steps = [_build_step(s, v, seed, cid, i)
+                             for i, s in enumerate(raw["steps"])]
+                except ValueError:
+                    continue        # 该特征不适用,静默跳过
+                meta = {"seq": True, "ops": [s.op for s in steps],
+                        "no_mtu_negotiate": no_neg}
+                if anchor is not None:
+                    meta["handle"] = anchor.value_handle
+                out.append(Case(id=cid, layer=layer, steps=steps, meta=meta))
+                count += 1
+                if per_anchor_cap is not None and count >= per_anchor_cap and anchor is not None:
+                    break
+            if count == 0:
+                log.warning("case %s expanded to 0 cases", rid)
+            continue
+
         # 需要 ${each.*} 的字段?
         fields = {k: raw.get(k) for k in ("handle", "offset", "start", "end", "mtu", "uuid")}
         value_spec = raw.get("value")
@@ -183,7 +271,8 @@ def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
             try:
                 pdu = _build_pdu(raw, gvars, seed)
                 out.append(Case(id=rid, layer=layer, pdu=pdu,
-                                meta={"op": raw.get("op")}))
+                                meta={"op": raw.get("op"),
+                                      "no_mtu_negotiate": bool(raw.get("no_mtu_negotiate", False))}))
             except ValueError as e:
                 log.warning("skip case %s: %s", rid, e)
             continue
@@ -205,7 +294,8 @@ def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
                 continue    # 该特征不适用(如不可写),静默跳过
             out.append(Case(id="%s@%04x" % (rid, c.value_handle), layer=layer,
                             pdu=pdu, meta={"op": raw.get("op"),
-                                           "handle": c.value_handle}))
+                                           "handle": c.value_handle,
+                                           "no_mtu_negotiate": bool(raw.get("no_mtu_negotiate", False))}))
             count += 1
             if per_anchor_cap is not None and count >= per_anchor_cap:
                 break
@@ -214,9 +304,13 @@ def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
 
     # PDU 去重:字节相同的用例对目标而言是同一个输入,结果必然相同,
     # 只保留首条(不同模板在边界处常撞出相同字节,白烧健康检查+连接事件)。
+    # 序列用例按全步 PDU 组合去重(首步撞车不代表序列相同);
+    # 未协商链路(no_mtu_negotiate)上的用例语义不同,不与协商链路的同字节用例判重。
     seen, deduped = set(), []
     for c in out:
-        key = c.pdu.hex()
+        body = "seq|" + "|".join(s.pdu.hex() for s in c.steps) \
+            if c.steps is not None else c.pdu.hex()
+        key = ("nonneg|" + body) if c.meta.get("no_mtu_negotiate") else body
         if key in seen:
             continue
         seen.add(key)

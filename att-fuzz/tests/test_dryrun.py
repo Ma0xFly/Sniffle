@@ -131,6 +131,12 @@ class FakeHw:
             rsp = bytes([0x15]) + pack("<HHHH", 251, 251, 2120, 2120)
             body = bytes([0x03, len(rsp)]) + rsp
             self._emit(DPacketMessage.from_body(body, is_data=True, peripheral_send=True))
+        elif pdu[0] == 0x02:  # LL_TERMINATE_IND(我方发出):真实对端会回 TERMINATE,
+            # 固件补丁 #2 上报 TerminateMeasurement -> transport 据此翻 _link_up
+            from sniffle.measurements import TerminateMeasurement
+            reason = pdu[1] if len(pdu) > 1 else 0x13
+            self._emit(TerminateMeasurement(bytes([reason])))
+            self._emit_state(SnifferState.PAUSED)
 
     # ---- ATT server ----
     def _error(self, req_opcode, handle, code):
@@ -284,6 +290,63 @@ def main():
     finally:
         central_fuzz.make_transport = orig
     assert rc == 0
+    print("replay 回归: %s" % rec["case_id"])
+
+    # ---- 序列用例:大跑中确实执行且逐步记录 ----
+    from core.att import exchange_mtu_req
+    recs = []
+    with (outdir / "ledger.jsonl").open() as fh:
+        for line in fh:
+            r = j.loads(line)
+            recs.append(r)
+    seq_recs = [r for r in recs if r.get("case_kind") == "sequence"]
+    assert seq_recs, "大跑没有执行任何序列用例"
+    for r in seq_recs:
+        assert r["steps"] and isinstance(r["alert_step"], int), r["case_id"]
+        assert all("classification" in s for s in r["steps"]), r["case_id"]
+        assert r["replay"]["kind"] == "sequence" and \
+            len(r["replay"]["steps"]) == len(r["steps"]), r["case_id"]
+    noneneg = [r for r in recs if r["case_id"].startswith("sm-noneneg")]
+    assert noneneg, "未协商 MTU 用例没有执行"
+    reneg = [r for r in seq_recs if r["case_id"] == "sm-mtu-reneg-2x"]
+    assert reneg and len(reneg[0]["steps"]) == 2
+    print("序列用例: %d 条(其中未协商 %d 条)" % (len(seq_recs), len(noneneg)))
+
+    # ---- replay 回归 1:write_cmd 台账记录透传 expect_response,不再 TIMEOUT 伪影 ----
+    outdir_r = REPO / "att-fuzz" / "logs" / "dryrun-test-replay"
+
+    def _clean_replay_outdir():
+        outdir_r.mkdir(parents=True, exist_ok=True)
+        for f in outdir_r.glob("*"):
+            f.unlink()
+
+    _clean_replay_outdir()
+    central_fuzz.make_transport = fake_make_transport
+    try:
+        rc = central_fuzz.run(target, [], outdir_r, seed=1,
+                              replay_pdu="520700", replay_expect=False)
+        assert rc == 0
+        led_r = Ledger(outdir_r / "ledger.jsonl")
+        r = led_r.find("replay")
+        assert r["classification"] == "OK_RESPONSE", r
+        assert r["replay"] == {"pdu": "520700", "expect_response": False}, r["replay"]
+        print("replay 回归: write_cmd 无响应正确(无 TIMEOUT 伪影)")
+
+        # ---- replay 回归 2:序列台账记录逐步重放 ----
+        _clean_replay_outdir()
+        rc = central_fuzz.run(target, [], outdir_r, seed=1, replay_steps=[
+            {"pdu": exchange_mtu_req(247).hex(), "expect_response": True, "observe": 0},
+            {"pdu": "520700", "expect_response": False, "observe": 0},
+        ])
+        assert rc == 0
+        r = Ledger(outdir_r / "ledger.jsonl").find("replay")
+        assert r["case_kind"] == "sequence" and len(r["steps"]) == 2, r
+        assert r["alert_step"] == 0 and r["classification"] == "OK_RESPONSE", r
+        assert r["steps"][1]["expect_response"] is False
+        assert r["replay"]["kind"] == "sequence", r["replay"]
+        print("replay 回归: 序列 2 步逐步重放正确")
+    finally:
+        central_fuzz.make_transport = orig
     print("FakeHw 干跑测试全部通过")
 
 

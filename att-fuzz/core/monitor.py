@@ -93,7 +93,7 @@ class Ledger:
         self._fh = self.path.open("a", encoding="utf-8")
 
     def record(self, result: CaseResult, case: dict | None = None,
-               replayable: dict | None = None):
+               replayable: dict | None = None, extra: dict | None = None):
         rec = asdict(result)
         rec["classification"] = result.classification.name
         rec["signature"] = result.signature or compute_signature(result)
@@ -101,6 +101,8 @@ class Ledger:
             rec["case"] = case
         if replayable:
             rec["replay"] = replayable
+        if extra:
+            rec.update(extra)       # 序列用例的 case_kind/steps 等扩展字段
         self._fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
         self._fh.flush()
 
@@ -140,8 +142,8 @@ class ObservableLedger(Ledger):
         self._listeners.append(fn)
 
     def record(self, result: CaseResult, case: dict | None = None,
-               replayable: dict | None = None):
-        super().record(result, case=case, replayable=replayable)
+               replayable: dict | None = None, extra: dict | None = None):
+        super().record(result, case=case, replayable=replayable, extra=extra)
         for fn in self._listeners:
             try:
                 fn(result, case, replayable)

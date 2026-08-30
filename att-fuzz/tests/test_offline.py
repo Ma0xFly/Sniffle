@@ -106,3 +106,68 @@ assert not serial_lock._pid_alive(proc.pid)
 lk3.release()
 assert not os.path.exists(path)             # release 清掉自己的锁
 print("serial_lock 自测全部通过")
+
+# 4) 序列用例展开 + 台账扩展字段(向后兼容)
+import json as _j
+import tempfile
+
+from core.att import exchange_mtu_req
+from core.corpus import CaseStep
+from core.monitor import CaseResult, Classification, Ledger
+
+seq_raw = [
+    {"id": "sm-seq-2x", "layer": "state-machine",
+     "steps": [{"op": "exchange_mtu_req", "mtu": 517},
+               {"op": "exchange_mtu_req", "mtu": 517, "observe": 0.5}]},
+    {"id": "sm-seq-dup", "layer": "state-machine",
+     "steps": [{"op": "exchange_mtu_req", "mtu": 517},
+               {"op": "exchange_mtu_req", "mtu": 517}]},   # 全步相同 -> 判重
+    {"id": "sm-seq-wcmd", "layer": "state-machine", "no_mtu_negotiate": True,
+     "filter": "writable",
+     "steps": [{"op": "write_cmd", "handle": "${each.value}",
+                "value": {"len": 4, "pattern": "incremental"}},
+               {"op": "read_req", "handle": "${each.value}"}]},
+]
+seq_cases = expand(seq_raw, m, mtu=247, seed=9)
+by_id = {}
+for c in seq_cases:
+    by_id.setdefault(c.id.split("@")[0], []).append(c)
+
+# 2x 与 dup 全步 PDU 组合相同 -> 只留首条
+assert len(by_id["sm-seq-2x"]) == 1 and "sm-seq-dup" not in by_id, sorted(by_id)
+s2 = by_id["sm-seq-2x"][0]
+assert s2.steps is not None and len(s2.steps) == 2
+assert s2.steps[0].pdu == exchange_mtu_req(517), s2.steps[0].pdu.hex()
+assert s2.steps[1].observe == 0.5 and s2.steps[1].expect_response
+assert s2.meta["seq"] and not s2.meta["no_mtu_negotiate"]
+
+# write_cmd 步默认无响应;fixture 4 特征全部可写 -> each 展开 4 条
+wcmd = by_id["sm-seq-wcmd"]
+assert len(wcmd) == 4, [c.id for c in wcmd]
+assert wcmd[0].meta["no_mtu_negotiate"] and wcmd[0].meta["seq"]
+assert wcmd[0].steps[0].expect_response is False      # write_cmd 推断
+assert wcmd[0].steps[0].pdu[0] == 0x52
+assert len(wcmd[0].steps[0].pdu) == 3 + 4
+assert wcmd[0].steps[1].expect_response is True and wcmd[0].steps[1].pdu[0] == 0x0A
+# 单 PDU 用例的统一视图
+single = expand([{"id": "x-read", "layer": "handle", "op": "read_req",
+                  "handle": "${each.value}", "filter": "readable"}],
+                m, mtu=247, seed=1)[0]
+assert single.steps is None and len(single.all_steps()) == 1
+assert single.all_steps()[0].pdu == single.pdu
+
+# 台账:extra 只影响传入的记录,单 PDU 记录 schema 不变
+tmp_led = Path(tempfile.mkdtemp()) / "ledger-extra.jsonl"
+led = Ledger(tmp_led)
+led.record(CaseResult(case_id="single", layer="handle",
+                      classification=Classification.OK_RESPONSE))
+led.record(CaseResult(case_id="seq", layer="state-machine",
+                      classification=Classification.TIMEOUT),
+           replayable={"kind": "sequence", "steps": [{"pdu": "aa"}]},
+           extra={"case_kind": "sequence", "alert_step": 1,
+                  "steps": [{"step": 0, "classification": "OK_RESPONSE"}]})
+rows = [_j.loads(l) for l in tmp_led.read_text().splitlines()]
+assert "case_kind" not in rows[0] and "steps" not in rows[0]
+assert rows[1]["case_kind"] == "sequence" and rows[1]["alert_step"] == 1
+assert rows[1]["replay"]["kind"] == "sequence"
+print("序列用例展开 + 台账扩展自测全部通过")

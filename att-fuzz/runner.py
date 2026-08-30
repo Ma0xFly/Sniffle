@@ -48,6 +48,7 @@ def main():
     ap.add_argument("--replay-case", default=None, metavar="CASE_ID",
                     help="按 case_id 从台账重放")
     ap.add_argument("--ledger", default=None, help="replay-case 用的台账路径")
+    ap.set_defaults(replay_expect=True, replay_steps=None)
     ap.add_argument("--discover-only", action="store_true",
                     help="只连接 + 发现,输出 GATT 地图后退出")
     ap.add_argument("--probe", action="store_true",
@@ -77,11 +78,21 @@ def main():
         if rec is None:
             raise SystemExit("case %r not found in %s" % (args.replay_case, ledger_path))
         replay = rec.get("replay") or {}
-        pdu_hex = replay.get("pdu")
-        if not pdu_hex:
-            raise SystemExit("该台账记录缺 replay.pdu,无法重放")
-        print("replaying %s: %s" % (args.replay_case, pdu_hex))
-        args.replay = pdu_hex
+        if replay.get("kind") == "sequence":
+            steps = replay.get("steps") or []
+            if not steps:
+                raise SystemExit("序列台账记录缺 replay.steps,无法重放")
+            print("replaying sequence %s: %d steps" % (args.replay_case, len(steps)))
+            args.replay_steps = steps
+        else:
+            pdu_hex = replay.get("pdu")
+            if not pdu_hex:
+                raise SystemExit("该台账记录缺 replay.pdu,无法重放")
+            print("replaying %s: %s" % (args.replay_case, pdu_hex))
+            args.replay = pdu_hex
+            # 台账记录的 expect_response 必须透传(如 write_cmd 无响应),
+            # 否则重放会强制等响应,产生 TIMEOUT 伪影
+            args.replay_expect = bool(replay.get("expect_response", True))
 
     try:
         if args.discover_only:
@@ -89,7 +100,9 @@ def main():
 
         sys.exit(central_fuzz.run(target, strategy, outdir, serport=args.serport,
                                   seed=args.seed, max_cases=args.max_cases,
-                                  replay_pdu=args.replay))
+                                  replay_pdu=args.replay,
+                                  replay_expect=args.replay_expect,
+                                  replay_steps=args.replay_steps))
     except SerialBusy as e:
         raise SystemExit("error: %s" % e)
 

@@ -83,15 +83,20 @@ def load_ledger(path) -> list:
 
 RUN_MARKS = ("ledger.jsonl", "gatt_map.json", "capture.pcap", "transport.jsonl")
 
+# 自测产物目录(test_dryrun.py 自测写入),非真实会话,页面不显示
+SELFTEST_DIRS = ("dryrun-test",)
+
 
 def run_dirs() -> list:
     """logs/ 下的会话目录,新→旧。
     目录名不限(改名后仍能识别);含任一会话产物
-    (台账/GATT地图/pcap/传输日志)即算会话,纯发现任务也会显示。"""
+    (台账/GATT地图/pcap/传输日志)即算会话,纯发现任务也会显示。
+    自测产物目录除外。"""
     if not LOGS_DIR.exists():
         return []
     dirs = [d for d in LOGS_DIR.iterdir()
-            if d.is_dir() and any((d / m).exists() for m in RUN_MARKS)]
+            if d.is_dir() and d.name not in SELFTEST_DIRS
+            and any((d / m).exists() for m in RUN_MARKS)]
 
     def _mtime(d):
         for m in RUN_MARKS:

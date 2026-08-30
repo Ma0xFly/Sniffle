@@ -103,7 +103,6 @@ class RunState:
         self.alerts = deque(maxlen=200)      # 告警用例行
         self.log_lines = deque(maxlen=400)   # 控制器日志
         self._log_seq = 0
-        self._log_read = 0                   # UI 已读游标
 
         # ---- 结构化结果 ----
         self.gatt = None             # discover/fuzz 后的 GattMap 快照(dict)
@@ -134,7 +133,6 @@ class RunState:
             self.results.clear()
             self.alerts.clear()
             self.log_lines.clear()
-            self._log_read = self._log_seq   # 旧 run 的日志不再推给新页面
             self.gatt = None
             self.probe_result = None
             self.replay_result = None
@@ -161,15 +159,6 @@ class RunState:
             self.log_lines.append({"ts": _now_str(), "line": line,
                                    "seq": self._log_seq})
             _append_log_file(line)
-
-    def take_logs(self):
-        """(已废弃用法)UI 拉取未读日志行。游标在 state 单例上,
-        多个浏览器页面同时轮询会互相抢行 -- 新代码请用 logs_since。"""
-        with self.lock:
-            lines = [l for l in self.log_lines if l["seq"] > self._log_read]
-            if lines:
-                self._log_read = lines[-1]["seq"]
-            return lines
 
     def log_seq(self) -> int:
         """当前日志序号(每个页面用它初始化自己的游标)。"""

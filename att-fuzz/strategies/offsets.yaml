@@ -1,0 +1,106 @@
+# ④ Offset 空间:基线长度边界、大 offset、(offset+len) 越过缓冲
+# ${baseline_len} = 该特征基线读到的值长度(读不到为 0)
+
+- id: o-blob-0
+  layer: offset
+  op: read_blob_req
+  handle: "${each.value}"
+  offset: 0
+  filter: readable
+
+- id: o-blob-1
+  layer: offset
+  op: read_blob_req
+  handle: "${each.value}"
+  offset: 1
+  filter: readable
+
+- id: o-blob-len-m1
+  layer: offset
+  op: read_blob_req
+  handle: "${each.value}"
+  offset: "${baseline_len-1}"
+  filter: readable
+
+- id: o-blob-len
+  layer: offset
+  op: read_blob_req
+  handle: "${each.value}"
+  offset: "${baseline_len}"
+  filter: readable
+
+- id: o-blob-len-p1
+  layer: offset
+  op: read_blob_req
+  handle: "${each.value}"
+  offset: "${baseline_len+1}"
+  filter: readable
+
+- id: o-blob-7fff
+  layer: offset
+  op: read_blob_req
+  handle: "${each.value}"
+  offset: 0x7FFF
+  filter: readable
+
+- id: o-blob-8000
+  layer: offset
+  op: read_blob_req
+  handle: "${each.value}"
+  offset: 0x8000
+  filter: readable
+
+- id: o-blob-ffff
+  layer: offset
+  op: read_blob_req
+  handle: "${each.value}"
+  offset: 0xFFFF
+  filter: readable
+
+- id: o-prepare-len
+  layer: offset
+  op: prepare_write_req
+  handle: "${each.value}"
+  offset: "${baseline_len}"
+  value: {len: 4, pattern: ff}
+  filter: writable
+
+- id: o-prepare-len-p1
+  layer: offset
+  op: prepare_write_req
+  handle: "${each.value}"
+  offset: "${baseline_len+1}"
+  value: {len: 4, pattern: ff}
+  filter: writable
+
+- id: o-prepare-len-bigval
+  layer: offset
+  op: prepare_write_req
+  handle: "${each.value}"
+  offset: "${baseline_len+1}"
+  value: {len: "${mtu-9}", pattern: incremental}
+  filter: writable
+
+- id: o-prepare-ffff
+  layer: offset
+  op: prepare_write_req
+  handle: "${each.value}"
+  offset: 0xFFFF
+  value: {len: 4, pattern: incremental}
+  filter: writable
+
+- id: o-prepare-8000
+  layer: offset
+  op: prepare_write_req
+  handle: "${each.value}"
+  offset: 0x8000
+  value: {len: 4, pattern: incremental}
+  filter: writable
+
+- id: o-prepare-7fff
+  layer: offset
+  op: prepare_write_req
+  handle: "${each.value}"
+  offset: 0x7FFF
+  value: {len: 4, pattern: incremental}
+  filter: writable

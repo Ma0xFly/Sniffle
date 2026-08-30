@@ -1,0 +1,11 @@
+{
+  "name": "vivo_tws",
+  "mac": "64:44:7B:EE:41:F4",
+  "search_string": "",
+  "mac_random": 0,
+  "conn_interval": 24,
+  "latency": 1,
+  "connect_timeout": 20,
+  "pairing": "none",
+  "comment": "阶段一实测目标:蓝牙耳机。mac 或 search_string 至少填一个(耳机广播名片段,如 'Sound'/'EDIFIER')"
+}

@@ -1,0 +1,97 @@
+# ① Opcode 空间:未知/保留 opcode、标志位翻转
+# payload 提供类 handle 形状(多数栈在查表阶段就应拒绝,参数内容次要)
+
+- id: op-rfu-00
+  layer: opcode
+  opcode: 0x00
+  payload: "0100"
+
+- id: op-rfu-1f
+  layer: opcode
+  opcode: 0x1F
+  payload: "0100"
+
+- id: op-gap-14
+  layer: opcode
+  opcode: 0x14
+  payload: "0100"
+
+- id: op-gap-15
+  layer: opcode
+  opcode: 0x15
+  payload: "0100"
+
+- id: op-gap-1a
+  layer: opcode
+  opcode: 0x1A
+  payload: "0100"
+
+- id: op-gap-20
+  layer: opcode
+  opcode: 0x20
+  payload: "0100"
+
+- id: op-gap-53
+  layer: opcode
+  opcode: 0x53
+  payload: "0100"
+
+- id: op-flag-read-or-40
+  layer: opcode
+  opcode: 0x4A       # 0x0A READ_REQ | 0x40
+  payload: "0100"
+
+- id: op-flag-read-or-80
+  layer: opcode
+  opcode: 0x8A       # 0x0A READ_REQ | 0x80
+  payload: "0100"
+
+- id: op-flag-grptype-or-40
+  layer: opcode
+  opcode: 0x50       # 0x10 READ_BY_GROUP_TYPE_REQ | 0x40
+  payload: "0100ffff"
+
+- id: op-flag-mtu-or-40
+  layer: opcode
+  opcode: 0x42       # 0x02 EXCHANGE_MTU_REQ | 0x40
+  payload: "0502"
+
+- id: op-gap-92
+  layer: opcode
+  opcode: 0x92       # 0x12 WRITE_REQ | 0x80
+  payload: "01004142"
+
+- id: op-gap-d3
+  layer: opcode
+  opcode: 0xD3       # 0xD2 SIGNED_WRITE_CMD + 1
+  payload: "01004142"
+
+- id: op-e0
+  layer: opcode
+  opcode: 0xE0
+  payload: "0100"
+
+- id: op-e1
+  layer: opcode
+  opcode: 0xE1
+  payload: ""
+
+- id: op-f0
+  layer: opcode
+  opcode: 0xF0
+  payload: "0100"
+
+- id: op-fe
+  layer: opcode
+  opcode: 0xFE
+  payload: "0100"
+
+- id: op-ff
+  layer: opcode
+  opcode: 0xFF
+  payload: "0100"
+
+- id: op-ff-empty
+  layer: opcode
+  opcode: 0xFF
+  payload: ""

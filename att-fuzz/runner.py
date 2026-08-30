@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+# att-fuzz/runner.py
+"""
+att-fuzz CLI(阶段一:central 模式)。
+
+用法:
+  python3 att-fuzz/runner.py --target att-fuzz/targets/headphone.json
+  python3 att-fuzz/runner.py --target ... --max-cases 50          # 冒烟
+  python3 att-fuzz/runner.py --target ... --replay <pdu_hex>      # 重放原始 PDU
+  python3 att-fuzz/runner.py --target ... --replay-case <id> --ledger <ledger.jsonl>
+  python3 att-fuzz/runner.py --target ... --discover-only         # 只做发现,存 GATT 地图
+"""
+
+import argparse
+import json
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "python_cli"))
+sys.path.insert(0, str(REPO / "att-fuzz"))
+
+from core.monitor import Ledger            # noqa: E402
+from core.serial_lock import SerialBusy    # noqa: E402
+from roles import central_fuzz             # noqa: E402
+
+
+def load_target(path: str) -> dict:
+    t = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not t.get("mac") and not t.get("search_string"):
+        raise SystemExit("target profile 需要 mac 或 search_string 之一(填 %s)" % path)
+    return t
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Sniffle ATT/GATT fuzzer (stage 1: central)")
+    ap.add_argument("--target", required=True, help="targets/*.json 路径")
+    ap.add_argument("--strategy", default=None,
+                    help="策略目录/文件(默认 att-fuzz/strategies/)")
+    ap.add_argument("--serport", default=None, help="串口(默认自动探测 XDS110)")
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--max-cases", type=int, default=0, help="0 = 全量")
+    ap.add_argument("--outdir", default=None, help="输出目录(默认 logs/run-<时间戳>)")
+    ap.add_argument("--replay", default=None, metavar="PDU_HEX",
+                    help="重放指定 ATT PDU(hex)")
+    ap.add_argument("--replay-case", default=None, metavar="CASE_ID",
+                    help="按 case_id 从台账重放")
+    ap.add_argument("--ledger", default=None, help="replay-case 用的台账路径")
+    ap.add_argument("--discover-only", action="store_true",
+                    help="只连接 + 发现,输出 GATT 地图后退出")
+    ap.add_argument("--probe", action="store_true",
+                    help="扫描诊断:目标是否在广播 + 地址类型(不连接)")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S")
+
+    target = load_target(args.target)
+    outdir = Path(args.outdir) if args.outdir else \
+            REPO / "att-fuzz" / "logs" / ("run-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+    strategy = [args.strategy] if args.strategy else [REPO / "att-fuzz" / "strategies"]
+
+    try:
+        if args.probe:
+            sys.exit(_probe(target, outdir, args.serport))
+    except SerialBusy as e:
+        raise SystemExit("error: %s" % e)
+
+    if args.replay_case:
+        ledger_path = Path(args.ledger) if args.ledger else _latest_ledger()
+        rec = Ledger(ledger_path).find(args.replay_case)
+        if rec is None:
+            raise SystemExit("case %r not found in %s" % (args.replay_case, ledger_path))
+        replay = rec.get("replay") or {}
+        pdu_hex = replay.get("pdu")
+        if not pdu_hex:
+            raise SystemExit("该台账记录缺 replay.pdu,无法重放")
+        print("replaying %s: %s" % (args.replay_case, pdu_hex))
+        args.replay = pdu_hex
+
+    try:
+        if args.discover_only:
+            sys.exit(_discover_only(target, outdir, args.serport))
+
+        sys.exit(central_fuzz.run(target, strategy, outdir, serport=args.serport,
+                                  seed=args.seed, max_cases=args.max_cases,
+                                  replay_pdu=args.replay))
+    except SerialBusy as e:
+        raise SystemExit("error: %s" % e)
+
+
+def _latest_ledger() -> Path:
+    logs = REPO / "att-fuzz" / "logs"
+    cands = sorted((p.parent for p in logs.glob("*/ledger.jsonl")),
+                   key=lambda p: p.stat().st_mtime)
+    if not cands:
+        raise SystemExit("没有历史台账(logs/*/ledger.jsonl,目录改名后只要台账在即可)")
+    return cands[-1] / "ledger.jsonl"
+
+
+def _probe(target, outdir, serport) -> int:
+    from core.serial_lock import guard as serial_guard
+    from core.transport import SniffleTransport
+    from sniffle.sniffle_hw import SniffleHW
+    with serial_guard(serport or target.get("serport"), "CLI 广播探测"):
+        transport = SniffleTransport(SniffleHW(serport=serport or target.get("serport")),
+                                     conn_interval_units=target.get("conn_interval", 12))
+        wire, _ = transport._parse_mac(target["mac"])
+        print("probe: 扫描目标 %s ..." % target["mac"])
+        r = transport.probe(wire)
+    if not r["found"]:
+        print("probe: 15s 内未发现目标广播。请确认:")
+        print("  - 耳机已进入配对/广播模式(开盖或长按配对键,且未被手机占用)")
+        print("  - MAC 是否写对(可与手机 nRF Connect 扫描结果核对)")
+        return 1
+    print("probe: 找到目标!")
+    print("  地址类型: %s" % r["addr_type"])
+    print("  广播地址: %s" % r["addr"])
+    print("  RSSI:     %d dBm" % r["rssi"])
+    print("  载荷前 32B: %s" % r["adv_preview"][:64])
+    raw_mr = target.get("mac_random", True)
+    want_random = bool(raw_mr)
+    if raw_mr is True or raw_mr is False:
+        mr_show = "true" if raw_mr else "false"
+    else:                        # 档案里写的是 0/1 等非布尔值,原样显示
+        mr_show = str(raw_mr)
+    mr_show += "({})".format("随机地址" if want_random else "public")
+    name = target.get("name") or "目标档案"
+    if r["addr_type"] == "random" and want_random:
+        print("  -> %s mac_random=%s,与广播地址类型(random)一致" % (name, mr_show))
+    elif r["addr_type"] != "random" and not want_random:
+        print("  -> %s mac_random=%s,与广播地址类型(public)一致" % (name, mr_show))
+    else:
+        print("  -> 注意:%s mac_random=%s,但广播地址类型是 %s,不一致,请修改档案!"
+              % (name, mr_show, r["addr_type"]))
+    return 0
+
+
+def _discover_only(target, outdir, serport) -> int:
+    from core.serial_lock import guard as serial_guard
+    outdir.mkdir(parents=True, exist_ok=True)
+    from core.session import FuzzSession
+    with serial_guard(serport or target.get("serport"), "CLI GATT 发现"):
+        transport = central_fuzz.make_transport(serport, target, outdir)
+        session = FuzzSession(transport, target, gatt_map_path=outdir / "gatt_map.json")
+        gatt = session.start()
+    print("ll_max=%d att_mtu=%d" % (transport.ll_max, transport.att_mtu))
+    print("GATT 地图已保存: %s" % (outdir / "gatt_map.json"))
+    print("服务 %d 个,特征 %d 个,gap %d 条" %
+          (len(gatt.services), len(gatt.characteristics), len(gatt.gaps)))
+    for s in gatt.services:
+        print("  service %s [%04X-%04X]" % (s.uuid, s.start_handle, s.end_handle))
+    return 0
+
+
+if __name__ == "__main__":
+    main()

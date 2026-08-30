@@ -1,0 +1,116 @@
+# ② Handle 空间:特殊值、真实 handle ±1、声明/CCCD handle、区间违规
+
+- id: h-read-0000
+  layer: handle
+  op: read_req
+  handle: 0
+
+- id: h-read-fffe
+  layer: handle
+  op: read_req
+  handle: 0xFFFE
+
+- id: h-read-ffff
+  layer: handle
+  op: read_req
+  handle: 0xFFFF
+
+- id: h-read-8000
+  layer: handle
+  op: read_req
+  handle: 0x8000
+
+- id: h-read-real-m1
+  layer: handle
+  op: read_req
+  handle: "${each.value-1}"
+  filter: readable
+
+- id: h-read-real-p1
+  layer: handle
+  op: read_req
+  handle: "${each.value+1}"
+  filter: readable
+
+- id: h-read-decl
+  layer: handle
+  op: read_req
+  handle: "${each.decl}"
+  filter: readable
+
+- id: h-read-cccd
+  layer: handle
+  op: read_req
+  handle: "${each.cccd}"
+  filter: readable
+
+- id: h-write-0000
+  layer: handle
+  op: write_req
+  handle: 0
+  value: {len: 2, pattern: incremental}
+
+- id: h-write-ffff
+  layer: handle
+  op: write_req
+  handle: 0xFFFF
+  value: {len: 2, pattern: incremental}
+
+- id: h-write-real-m1
+  layer: handle
+  op: write_req
+  handle: "${each.value-1}"
+  value: {len: 2, pattern: incremental}
+  filter: writable
+
+- id: h-blob-0000
+  layer: handle
+  op: read_blob_req
+  handle: 0
+  offset: 0
+
+- id: h-findinfo-inverted
+  layer: handle
+  op: find_info_req
+  start: 0xFFFF
+  end: 1
+
+- id: h-findinfo-zero-range
+  layer: handle
+  op: find_info_req
+  start: 0
+  end: 0
+
+- id: h-findinfo-all-ones
+  layer: handle
+  op: find_info_req
+  start: 0xFFFF
+  end: 0xFFFF
+
+- id: h-rbt-inverted
+  layer: handle
+  op: read_by_type_req
+  start: 0xFFFF
+  end: 1
+  uuid: 0x2803
+
+- id: h-rbt-zero-range
+  layer: handle
+  op: read_by_type_req
+  start: 0
+  end: 0
+  uuid: 0x2803
+
+- id: h-rbgt-inverted
+  layer: handle
+  op: read_by_group_type_req
+  start: 0xFFFF
+  end: 1
+  uuid: 0x2800
+
+- id: h-rbgt-zero-range
+  layer: handle
+  op: read_by_group_type_req
+  start: 0
+  end: 0
+  uuid: 0x2800

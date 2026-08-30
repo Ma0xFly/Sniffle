@@ -1,0 +1,114 @@
+# ③ Value 内容:长度边界(MTU 相对 + 绝对大值) × 内容模式
+# 注:${mtu} 为协商后的 ATT MTU;len 是 value 字节数,write_req 合法上界 = mtu-3
+
+- id: v-len-0
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: 0, pattern: zero}
+  filter: writable
+
+- id: v-len-1-zero
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: 1, pattern: zero}
+  filter: writable
+
+- id: v-len-1-ff
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: 1, pattern: ff}
+  filter: writable
+
+- id: v-len-20-incr
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: 20, pattern: incremental}
+  filter: writable
+
+- id: v-len-20-fmtstr
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: 20, pattern: fmtstring}
+  filter: writable
+
+- id: v-len-mtu-3-incr
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: "${mtu-3}", pattern: incremental}
+  filter: writable
+
+- id: v-len-mtu-3-random
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: "${mtu-3}", pattern: random}
+  filter: writable
+
+- id: v-len-mtu-2-ff
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: "${mtu-2}", pattern: ff}
+  filter: writable
+
+- id: v-len-mtu-1-incr
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: "${mtu-1}", pattern: incremental}
+  filter: writable
+
+- id: v-len-mtu-incr
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: "${mtu}", pattern: incremental}
+  filter: writable
+
+- id: v-len-mtu-p5-incr
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: "${mtu+5}", pattern: incremental}
+  filter: writable
+
+- id: v-len-244-incr
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: 244, pattern: incremental}
+  filter: writable
+
+- id: v-len-247-incr
+  layer: value
+  op: write_cmd
+  handle: "${each.value}"
+  value: {len: 247, pattern: incremental}
+  filter: writable
+
+- id: v-len-255-incr
+  layer: value
+  op: write_cmd
+  handle: "${each.value}"
+  value: {len: 255, pattern: incremental}
+  filter: writable
+
+- id: v-len-20-ascii
+  layer: value
+  op: write_req
+  handle: "${each.value}"
+  value: {len: 20, pattern: ascii}
+  filter: writable
+
+- id: v-wcmd-mtu-3
+  layer: value
+  op: write_cmd
+  handle: "${each.value}"
+  value: {len: "${mtu-3}", pattern: incremental}
+  filter: writable

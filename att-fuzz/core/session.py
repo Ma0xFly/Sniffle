@@ -254,6 +254,37 @@ class FuzzSession:
         for idx, step in enumerate(steps):
             row = {"step": idx, "op": step.op,
                    "expect_response": step.expect_response}
+            # 纯监听观察步:不等 ATT 响应,经事件流收集对端发来的通知/指示
+            if step.op == "__listen__":
+                collected = []
+                seen = 0
+                def _on(rec):
+                    nonlocal seen
+                    seen += 1
+                    if rec.get("kind") == "rx_att":
+                        collected.append(rec["pdu"])
+                self.t.add_event_listener(_on)
+                try:
+                    stop = time.time() + (step.observe or 1.0)
+                    while time.time() < stop:
+                        try:
+                            self.t.recv_att(timeout=0.1)
+                        except LinkDrop as drop:
+                            dropped = drop
+                            break
+                finally:
+                    try:
+                        self.t._event_listeners.remove(_on)
+                    except ValueError:
+                        pass
+                notifs = [p for p in collected
+                          if p[:2] in ("1b", "1d")]   # 0x1B notify / 0x1D indicate
+                row["notifications"] = notifs
+                row["classification"] = "OK_RESPONSE"
+                step_rows.append(row)
+                if dropped is not None:
+                    break
+                continue
             row.update(self._case_fields(step.pdu))
             notes = []
             cls = None

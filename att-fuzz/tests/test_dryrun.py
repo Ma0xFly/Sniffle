@@ -243,7 +243,9 @@ def main():
     orig = central_fuzz.make_transport
     orig_guard = central_fuzz.serial_guard
     central_fuzz.make_transport = fake_make_transport
-    # FakeHw 不碰硬件,串口锁换成 no-op,避免离线测试去抢真实设备的锁
+    # FakeHw 不碰硬件,串口锁换成 no-op,避免离线测试去抢真实设备的锁。
+    # 该替换保持到 main 末尾再恢复——后续 replay 段同样走 FakeHw,
+    # 若中途恢复为真锁,测试会依赖"真实串口空闲"(并行跑任务时 SerialBusy 炸)。
     import contextlib
     central_fuzz.serial_guard = lambda *a, **k: contextlib.nullcontext()
     try:
@@ -251,7 +253,6 @@ def main():
                               seed=7, max_cases=0)
     finally:
         central_fuzz.make_transport = orig
-        central_fuzz.serial_guard = orig_guard
     assert rc == 0
 
     from core.monitor import Ledger
@@ -347,6 +348,7 @@ def main():
         print("replay 回归: 序列 2 步逐步重放正确")
     finally:
         central_fuzz.make_transport = orig
+    central_fuzz.serial_guard = orig_guard    # 全部段结束,恢复真实串口锁
     print("FakeHw 干跑测试全部通过")
 
 

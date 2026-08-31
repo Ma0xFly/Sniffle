@@ -166,10 +166,13 @@ def _global_vars(gatt: GattMap, mtu: int, anchor_value_handle: int | None) -> di
     wvalue = next((c.value_handle for c in gatt.characteristics
                    if c.has_prop(Characteristic.PROP_WRITE) or
                    c.has_prop(Characteristic.PROP_WRITE_NO_RSP)), fallback)
+    cccd = next((c.cccd_handle for c in gatt.characteristics if c.cccd_handle),
+                fallback)
     return {
         "mtu": mtu,
         "value": anchor_value_handle or (gatt.value_handles()[0] if gatt.value_handles() else 1),
         "wvalue": wvalue,    # 首个可写特征值句柄(灌包/缓冲类用例锚点)
+        "cccd": cccd,        # 首个已发现 CCCD 句柄(订阅类用例锚点)
     }
 
 
@@ -180,13 +183,23 @@ def _is_each(expr) -> bool:
 def _build_step(step_raw: dict, v: dict, seed, case_id: str, idx: int) -> CaseStep:
     """构造序列的某一步。字段与单 PDU 模板同构(op/handle/value/...),
     另支持 expect_response(默认按 op 推断:write_cmd 无响应)、
-    observe(步间观察窗秒)、payload(无 op 的裸字节步,hex)。"""
+    observe(步间观察窗秒)、payload(无 op 的裸字节步,hex)、
+    value_hex(整段 hex 值,与 value 互斥)、listen(仅监听不等响应的观察步)。"""
     step_raw = dict(step_raw)
     # random pattern 的确定性种子:按步区分,同 seed 同结果
     step_raw["id"] = "%s#s%d" % (case_id, idx)
+    if step_raw.pop("listen", False):
+        return CaseStep(pdu=b"", expect_response=False, observe=0.0,
+                        op="__listen__")
     op = step_raw.get("op")
     if op is None:
         pdu = bytes.fromhex(step_raw["payload"])
+    elif "value_hex" in step_raw and op in ("write_cmd", "write_req",
+                                            "prepare_write_req"):
+        value = bytes.fromhex(step_raw["value_hex"])
+        h = eval_expr(step_raw["handle"], v)
+        pdu = {"write_cmd": write_cmd, "write_req": write_req,
+               "prepare_write_req": prepare_write_req}[op](h, value)
     else:
         pdu = _build_pdu(step_raw, v, seed)
     expect = step_raw.get("expect_response")
@@ -258,6 +271,28 @@ def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
                     if req_filter == "readable" and \
                             not anchor.has_prop(Characteristic.PROP_READ):
                         continue
+                    if req_filter == "notify_capable" and \
+                            not (anchor.has_prop(Characteristic.PROP_NOTIFY) or
+                                 anchor.has_prop(Characteristic.PROP_INDICATE)):
+                        continue
+                    if req_filter == "indicate_capable" and \
+                            not anchor.has_prop(Characteristic.PROP_INDICATE):
+                        continue
+                    if req_filter == "notify_only" and \
+                            (not anchor.has_prop(Characteristic.PROP_NOTIFY) or
+                             anchor.has_prop(Characteristic.PROP_INDICATE)):
+                        continue
+                    if req_filter == "notify_capable" and \
+                            not (anchor.has_prop(Characteristic.PROP_NOTIFY) or
+                                 anchor.has_prop(Characteristic.PROP_INDICATE)):
+                        continue
+                    if req_filter == "indicate_capable" and \
+                            not anchor.has_prop(Characteristic.PROP_INDICATE):
+                        continue
+                    if req_filter == "notify_only" and \
+                            (not anchor.has_prop(Characteristic.PROP_NOTIFY) or
+                             anchor.has_prop(Characteristic.PROP_INDICATE)):
+                        continue
                     v = _char_vars(anchor, gatt, mtu)
                     v.update({k: gvars[k] for k in gvars if k not in v})
                     cid = "%s@%04x" % (rid, anchor.value_handle)
@@ -294,7 +329,8 @@ def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
                 log.warning("skip case %s: %s", rid, e)
             continue
 
-        # ${each.*} 展开:逐特征(filter: writable/readable 限定适用面)
+        # ${each.*} 展开:逐特征(filter: writable/readable/notify_capable/
+        # indicate_capable/notify_only 限定适用面)
         req_filter = raw.get("filter")
         count = 0
         for c in chars:
@@ -302,6 +338,17 @@ def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
                     c.has_prop(Characteristic.PROP_WRITE_NO_RSP)):
                 continue
             if req_filter == "readable" and not c.has_prop(Characteristic.PROP_READ):
+                continue
+            if req_filter == "notify_capable" and not (
+                    c.has_prop(Characteristic.PROP_NOTIFY) or
+                    c.has_prop(Characteristic.PROP_INDICATE)):
+                continue
+            if req_filter == "indicate_capable" and \
+                    not c.has_prop(Characteristic.PROP_INDICATE):
+                continue
+            if req_filter == "notify_only" and \
+                    (not c.has_prop(Characteristic.PROP_NOTIFY) or
+                     c.has_prop(Characteristic.PROP_INDICATE)):
                 continue
             v = _char_vars(c, gatt, mtu)
             v.update({k: gvars[k] for k in gvars if k not in v})

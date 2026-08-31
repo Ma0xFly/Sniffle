@@ -229,7 +229,7 @@ class PcapBleReader:
         assert (flags & 0x0413) == 0x0413
         crc_err = False if (flags & 0x0800) else True
         phy = PhyMode(flags >> 14)
-        pdu_type = (flags & 0x0380) >> 15
+        pdu_type = (flags & 0x0380) >> 7
         assert pdu_type < 4 # isochronous unsupported for now
 
         body_idx = 14

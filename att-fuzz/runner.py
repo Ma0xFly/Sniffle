@@ -67,6 +67,12 @@ def main():
                     help="server 运行秒数(0=一直跑到 Ctrl-C)")
     ap.add_argument("--adb-serial", default="ZD9L8H454HDY7DEU",
                     help="logcat oracle 的 Android 序列号")
+    ap.add_argument("--sniff-pairing", action="store_true",
+                    help="被动嗅探配对与密钥收割(阶段四 4.1,单板)")
+    ap.add_argument("--sniff-duration", type=float, default=0.0,
+                    help="嗅探运行秒数(0=跑到 Ctrl-C)")
+    ap.add_argument("--sniff-mac", default=None, metavar="MAC",
+                    help="嗅探目标外设 MAC(书写序 AA:BB:..;缺省用目标档案)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -109,6 +115,11 @@ def main():
             args.replay_expect = bool(replay.get("expect_response", True))
 
     try:
+        if args.sniff_pairing:
+            from roles import pairing_sniff
+            sys.exit(pairing_sniff.run(target, outdir, serport=args.serport,
+                                       duration=args.sniff_duration,
+                                       mac=args.sniff_mac))
         if args.server:
             from roles import server_fuzz
             sys.exit(server_fuzz.run(target, outdir, serport=args.serport,

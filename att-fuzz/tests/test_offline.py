@@ -9,8 +9,8 @@ sys.path.insert(0, str(REPO / "att-fuzz"))
 
 # 1) 全模块导入
 from core import (att, transport, gatt_map, monitor, session, corpus,  # noqa
-                  att_server, adb_oracle)
-from roles import central_fuzz, server_fuzz  # noqa
+                  att_server, adb_oracle, bt_crypto, smp)
+from roles import central_fuzz, server_fuzz, pairing_sniff  # noqa
 print("imports OK")
 
 # 2) 合成 GATT 地图 + 语料展开
@@ -348,3 +348,99 @@ assert _evs[0].name == "native_crash" and _evs[0].context == "op=0x10"
 assert _evs[1].name == "bt_process_died"
 assert all(len(e.window) >= 1 for e in _evs)
 print("adb logcat oracle 自测全部通过")
+
+# 9) 阶段四 4.1 密码学原语 + SMP 解析:规范向量(crackle 01_crack 实采 + BT spec CCM 样本)
+from core import bt_crypto as _bc
+from core.smp import SmpExchange as _SmpX, _rev as _smprev, AUTHREQ_SC
+_h = lambda s: bytes.fromhex(s)
+
+# ---- bt_crypto: BT spec CCM 样本(crackle test.c sample data)----
+_sk = _h("99ad1b5226a37e3e058e3b8e27c2c666")
+_iv = _h("24abdcbabebaafde")
+_nonce = b"\x00" * 5 + _iv
+assert _bc.ccm_decrypt(_sk, _nonce, _h("03"), _h("a3"), _h("4c13a415")) == _h("06")
+_ct, _mic = _bc.ccm_encrypt(_sk, _nonce, _h("03"), _h("06"))
+assert _ct == _h("a3") and _mic == _h("4c13a415")
+# 错误 MIC -> None
+assert _bc.ccm_decrypt(_sk, _nonce, _h("03"), _h("a3"), _h("00000000")) is None
+
+# ---- bt_crypto: crackle 01_crack 全链(legacy Just Works,大端序)----
+_TK = _h("00000000000000000000000000000000")
+_srand = _h("d85a8e2663e8ff8130540640e20baa7d")
+_mrand = _h("fca57d0fa4aed3aaf40146fdeb92b6ab")
+_preq = _h("01001005000301"); _pres = _h("01001005000002")
+_ia = _h("083e8ee10b3e"); _ra = _h("78c5e56edde8"); _iat = 0; _rat = 0
+# c1: Mconfirm/Sconfirm
+assert _bc.c1(_TK, _mrand, _preq, _pres, _iat, _rat, _ia, _ra) == \
+        _h("5d2c8d41c85b683de12080d73e98bbfe")
+assert _bc.c1(_TK, _srand, _preq, _pres, _iat, _rat, _ia, _ra) == \
+        _h("29cbf88db0a87170a105b587cb8bef78")
+# s1: STK
+_STK = _bc.s1(_TK, _srand, _mrand)
+assert _STK == _h("59d4b35ece0df548c10efe17e9da1f4c")
+# session key
+_skdm = _h("9f6b013d7eb25f87"); _skds = _h("68f5add3ca185186")
+_ivwire = _h("ea6ec7cc6199de66")
+_sessk = _bc.session_key(_STK, _skdm, _skds)
+assert _sessk == _h("51b22eae6102e4b60b4a84227bfe1d60")
+# CCM 解密 LTK 分发帧(slave dir, counter=1)
+_nonce2 = _bc.ccm_nonce(1, _bc.DIR_S2M, _ivwire)
+_dec = _bc.ccm_decrypt(_sessk, _nonce2, _h("02"),
+                       _h("00f4ba44918d57fa21d63803593b179fc7efa6f3cb"),
+                       _h("844dcdb2"))
+assert _dec == _h("11000600069cd42e6a891d8be6bba504f153c0627f")
+assert _dec[5:21] == _h("9cd42e6a891d8be6bba504f153c0627f")   # LTK(wire)
+# LLCipherState 端到端:3 个加密包逐包解密
+_st = _bc.LLCipherState(_sessk, _ivwire)
+_pkts = [
+    (0x03, _h("71"), _h("b5acd1d8"), _bc.DIR_M2S, 0),
+    (0x02, _h("00f4ba44918d57fa21d63803593b179fc7efa6f3cb"), _h("844dcdb2"), _bc.DIR_S2M, 1),
+    (0x03, _h("36e3"), _h("9a83eec6"), _bc.DIR_M2S, 1),
+]
+_decs = [_st.decrypt_packet(h, e, m, d, sn) for h, e, m, d, sn in _pkts]
+assert _decs[0] == _h("06")
+assert _decs[1] == _h("11000600069cd42e6a891d8be6bba504f153c0627f")
+assert _decs[2] == _h("0213")
+print("bt_crypto 规范向量自测全部通过")
+
+# ---- smp: 01_crack 端到端(空口序喂入 SmpExchange)----
+_ex = _SmpX()
+_ex.set_addresses(bytes(reversed(_ia)), bytes(reversed(_ra)), _iat, _rat)
+# 空口序 = 逆序大端字段
+_ex.feed(bytes(reversed(_preq)))                          # Pairing Request
+_ex.feed(bytes(reversed(_pres)))                         # Pairing Response
+_ex.feed(b"\x03" + bytes(reversed(_h("5d2c8d41c85b683de12080d73e98bbfe"))))  # Mconfirm
+_ex.feed(b"\x03" + bytes(reversed(_h("29cbf88db0a87170a105b587cb8bef78"))))  # Sconfirm
+_ex.feed(b"\x04" + bytes(reversed(_mrand)))              # Mrand
+_ex.feed(b"\x04" + bytes(reversed(_srand)))              # Srand
+assert _ex.is_secure_connections is False
+assert _ex.legacy_method == "JustWorks"
+assert _ex.verify_confirms() is True
+assert _ex.derive_stk() == _h("59d4b35ece0df548c10efe17e9da1f4c")
+# 喂 Encryption Information 收割 LTK
+_ex.feed(b"\x06" + bytes(reversed(_h("7f62c053f104a5bbe68b1d896a2ed49c"))))
+assert _ex.ltk_be == _h("7f62c053f104a5bbe68b1d896a2ed49c")
+
+# ---- smp: SC 判定(双证据)----
+# preq 带 SC 位 -> is_secure_connections=True
+_preq_sc = b"\x01\x03\x00" + bytes([AUTHREQ_SC | 0x04]) + b"\x10\x07\x07"
+_exsc = _SmpX(); _exsc.set_addresses(b"\x11"*6, b"\x22"*6, 1, 1)
+_exsc.feed(_preq_sc); _exsc.feed(b"\x02\x03\x00\x0c\x10\x07\x07")
+assert _exsc.is_secure_connections is True
+# 或出现 Public Key PDU(0x0C) -> SC
+_expk = _SmpX(); _expk.feed(b"\x0c" + b"\x00"*64)
+assert _expk.is_secure_connections is True
+# Just Works verify_confirms:篡改 mrand 一字节 -> False(TK 非 0/JustWorks 不成立)
+_exbad = _SmpX(); _exbad.set_addresses(bytes(reversed(_ia)), bytes(reversed(_ra)), 0, 0)
+_exbad.feed(bytes(reversed(_preq))); _exbad.feed(bytes(reversed(_pres)))
+_exbad.feed(b"\x03" + bytes(reversed(_h("5d2c8d41c85b683de12080d73e98bbfe"))))
+_exbad.feed(b"\x03" + bytes(reversed(_h("29cbf88db0a87170a105b587cb8bef78"))))
+_mrand_bad = bytearray(bytes(reversed(_mrand))); _mrand_bad[0] ^= 0xFF
+_exbad.feed(b"\x04" + bytes(_mrand_bad)); _exbad.feed(b"\x04" + bytes(reversed(_srand)))
+assert _exbad.verify_confirms() is False
+print("smp 解析与配对方式判定自测全部通过")
+
+# ---- pairing_sniff: MAC 解析(书写序 -> 线序)----
+assert pairing_sniff._parse_mac("64:44:7B:EE:41:F4") == bytes.fromhex("f441ee7b4464")
+assert pairing_sniff._parse_mac("AA:BB:CC:DD:EE:11") == bytes.fromhex("11eeddccbbaa")
+print("pairing_sniff MAC 解析自测通过")

@@ -106,6 +106,11 @@ def _run_locked(outdir: Path, serport, duration: float, name: str,
     oracle.start()
 
     adv_data, scan_rsp = build_adv_data(name)
+    # MAC 只生成一次并全程复用:random_addr() 每次调用都换新地址,若在重广播
+    # 循环里反复调用,手机每次看到的都是"新设备" -- 缓存/重连全失效
+    # (实测:手机把同名不同地址记成多个设备,nRF Connect 再连必失败)。
+    our_mac = t.hw.random_addr()
+    log.info("our static random address: %s", our_mac.hex())
     ledger_path = outdir / "server_ledger.jsonl"
     started = time.time()
     conn_no = 0
@@ -121,7 +126,7 @@ def _run_locked(outdir: Path, serport, duration: float, name: str,
             if duration and time.time() - started >= duration:
                 log.info("duration reached, stopping")
                 break
-            t.advertise(adv_data, scan_rsp, interval_ms=interval_ms)
+            t.advertise(adv_data, scan_rsp, interval_ms=interval_ms, mac=our_mac)
             log.info("advertising as %r ... (手机扫描连接)", name)
             conn = t.accept_connection(timeout=duration if duration else None)
             if conn is None:

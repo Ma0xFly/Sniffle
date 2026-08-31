@@ -43,11 +43,20 @@ LL_TERMINATE_IND = 0x02
 LL_UNKNOWN_RSP = 0x07      # 规范:0x07=UNKNOWN_RSP,0x08=FEATURE_REQ(旧值 0x08 误标)
 LL_FEATURE_REQ = 0x08
 LL_FEATURE_RSP = 0x09
+LL_VERSION_IND = 0x0C
+LL_CONN_PARAM_REQ = 0x12
+LL_CONN_PARAM_RSP = 0x13
 LL_LENGTH_REQ = 0x14
 LL_LENGTH_RSP = 0x15
 
 # 我们作为 server/peripheral 向手机声明的 LL 特征:DLE(bit5)。无加密(无 SMP,设计边界)。
 LL_FEATURES_MASK = 0x20
+
+# 我们代答的 LL 版本信息:TI(0x000D) + BT 5.2。严格栈(实测 MTK)在版本交换
+# 未完成时会挂起后续 LL 过程(DLE 等)乃至 host 数据 -> GATT 40s LMP 超时。
+LL_VERSION_NR = 11
+LL_COMPANY_ID = 0x000D
+LL_SUBVERSION_NR = 0x0001
 
 LL_MAX_PAYLOAD_DLE = 251
 LL_TIME_DLE = 2120          # 251 字节 @2M 的 us 数,协商值里用它
@@ -734,6 +743,20 @@ class SniffleTransport:
             self._log_event("ll_feature_req")
         elif opcode == LL_FEATURE_RSP:
             self._log_event("ll_feature_rsp")
+        elif opcode == LL_VERSION_IND:
+            # 版本交换:固件不实现,host 代答。LL 控制过程在 central 侧串行,
+            # 版本交换挂着 -> DLE/ATT 全不开始(实测 MTK 栈 40s GATT LMP 超时)。
+            self.hw.cmd_transmit(3, bytes([LL_VERSION_IND]) +
+                    pack("<BHH", LL_VERSION_NR, LL_COMPANY_ID, LL_SUBVERSION_NR))
+            self._log_event("ll_version_ind",
+                            peer=payload[1:].hex() if len(payload) > 1 else "")
+        elif opcode == LL_CONN_PARAM_REQ:
+            # central 连接参数请求:回声接受其提议(最小合规应答);
+            # 后续 UPDATE_IND 由固件 rconf 机制自行跟随。
+            if len(payload) >= 12:
+                rsp = bytes([LL_CONN_PARAM_RSP]) + payload[1:12] + b"\x00" * 12
+                self.hw.cmd_transmit(3, rsp)
+            self._log_event("ll_conn_param_req")
         elif opcode == LL_LENGTH_REQ:
             # 对端发起 DLE:回 RSP(我们的收发上限)
             peer_max_rx = unpack("<H", payload[1:3])[0] if len(payload) >= 3 else 27

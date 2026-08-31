@@ -514,6 +514,11 @@ def main():
     assert b"Sniffle Server" in adv and bytes([3, 0x03, 0x0F, 0x18]) in adv
     pt.advertise(adv, srsp, interval_ms=200)
     assert phw.advertised and phw.advertised[-1][0] == bytes(adv)
+    # 稳定地址:advertise 显式传 mac 时走 cmd_setaddr(重广播循环全程同地址,
+    # 防 random_addr() 每轮换新地址导致手机缓存/重连失效)
+    stable = b"\x11\x22\x33\x44\x55\xC0"
+    pt.advertise(adv, srsp, interval_ms=200, mac=stable)
+    assert phw.setaddr == (stable, True)
     # 手机 CONNECT_IND -> accept_connection 返回参数,链路 up,连接参数对齐
     _emit_connect_ind(phw)
     conn = pt.accept_connection(timeout=5.0)

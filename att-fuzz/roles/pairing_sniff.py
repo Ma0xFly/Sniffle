@@ -179,21 +179,18 @@ def _run_locked(target, outdir, serport, duration, mac_override,
             if msg is None:
                 continue
             if isinstance(msg, PacketMessage):
+                # recv_and_decode 已用 hw.decoder_state 完成类型化解码(含扩展广播
+                # aux 状态机);再裸调 DPacketMessage.decode(msg) 会因缺 dstate 在
+                # aux 包上崩('NoneType' has no 'aux_pending_scan_rsp')--不重解码。
+                # 解码失败时 recv_and_decode 自身已兜底返回原始 PacketMessage。
                 try:
-                    dpkt = DPacketMessage.decode(msg)
-                except Exception as e:
-                    log.debug("decode error: %s", e)
-                    if _storm_check(time.monotonic(), repr(e)[:60]):
-                        _desync_recover("decode: %s" % repr(e)[:40])
-                    continue
-                try:
-                    pcap.write_packet_message(dpkt)
+                    pcap.write_packet_message(msg)
                 except Exception:
                     pass
-                if isinstance(dpkt, ConnectIndMessage):
-                    _on_connect(dpkt, ex, state, record, conn_ts, phone_wire)
-                elif isinstance(dpkt, DataMessage):
-                    _on_data(dpkt, ex, state, record, rx)
+                if isinstance(msg, ConnectIndMessage):
+                    _on_connect(msg, ex, state, record, conn_ts, phone_wire)
+                elif isinstance(msg, DataMessage):
+                    _on_data(msg, ex, state, record, rx)
             elif isinstance(msg, StateMessage):
                 record(kind="state", new=msg.new_state.name, old=msg.last_state.name)
                 # 连接跟随结束判定:离开 DATA 态(pause_done=False 下会回

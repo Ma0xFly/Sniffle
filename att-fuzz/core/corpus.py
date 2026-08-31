@@ -106,6 +106,15 @@ class Case:
 
 
 # 每种 op 对应的构造器:(case, variables) -> bytes
+def _value_bytes(case_raw: dict, v: dict, seed) -> bytes:
+    """写类 op 的值:value_hex(整段 hex)优先,否则 value pattern 生成。"""
+    if "value_hex" in case_raw:
+        return bytes.fromhex(case_raw["value_hex"])
+    spec = case_raw.get("value") or {}
+    return gen_value(spec.get("pattern", "zero"),
+                     eval_expr(spec.get("len", 0), v), seed, case_raw.get("id", ""))
+
+
 def _build_pdu(case_raw: dict, v: dict, seed) -> bytes:
     op = case_raw["op"]
 
@@ -120,17 +129,12 @@ def _build_pdu(case_raw: dict, v: dict, seed) -> bytes:
         # handles 为显式句柄列表(阶段一仅作辅助;逐锚点展开留阶段二)
         return read_multiple_req(case_raw["handles"])
     if op == "write_req":
-        value = gen_value(case_raw["value"].get("pattern", "zero"),
-                          eval_expr(case_raw["value"].get("len", 0), v), seed, case_raw["id"])
-        return write_req(val_of("handle"), value)
+        return write_req(val_of("handle"), _value_bytes(case_raw, v, seed))
     if op == "write_cmd":
-        value = gen_value(case_raw["value"].get("pattern", "zero"),
-                          eval_expr(case_raw["value"].get("len", 0), v), seed, case_raw["id"])
-        return write_cmd(val_of("handle"), value)
+        return write_cmd(val_of("handle"), _value_bytes(case_raw, v, seed))
     if op == "prepare_write_req":
-        value = gen_value(case_raw["value"].get("pattern", "ff"),
-                          eval_expr(case_raw["value"].get("len", 4), v), seed, case_raw["id"])
-        return prepare_write_req(val_of("handle"), val_of("offset", 0), value)
+        return prepare_write_req(val_of("handle"), val_of("offset", 0),
+                                 _value_bytes(case_raw, v, seed))
     if op == "execute_write_req":
         return execute_write_req(val_of("flags", 1))
     if op == "find_info_req":
@@ -189,17 +193,12 @@ def _build_step(step_raw: dict, v: dict, seed, case_id: str, idx: int) -> CaseSt
     # random pattern 的确定性种子:按步区分,同 seed 同结果
     step_raw["id"] = "%s#s%d" % (case_id, idx)
     if step_raw.pop("listen", False):
-        return CaseStep(pdu=b"", expect_response=False, observe=0.0,
+        return CaseStep(pdu=b"", expect_response=False,
+                        observe=float(step_raw.get("observe", 1.0) or 1.0),
                         op="__listen__")
     op = step_raw.get("op")
     if op is None:
         pdu = bytes.fromhex(step_raw["payload"])
-    elif "value_hex" in step_raw and op in ("write_cmd", "write_req",
-                                            "prepare_write_req"):
-        value = bytes.fromhex(step_raw["value_hex"])
-        h = eval_expr(step_raw["handle"], v)
-        pdu = {"write_cmd": write_cmd, "write_req": write_req,
-               "prepare_write_req": prepare_write_req}[op](h, value)
     else:
         pdu = _build_pdu(step_raw, v, seed)
     expect = step_raw.get("expect_response")

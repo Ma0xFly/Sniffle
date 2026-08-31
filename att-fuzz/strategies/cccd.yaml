@@ -1,0 +1,91 @@
+# ⑦ CCCD 语义。vivo 实测几乎无已发现 CCCD(0x2902),按指令只跑:
+#   - 对任意 value handle 写 CCCD 语义值(栈是否校验"特性能否通知")
+#   - 对可写特征连写三个不同值(订阅抖动)+ listen 监听通知到达
+# value_hex = 2 字节 on-air 小端: 0100=notification 0200=indication 0300=both
+# 0000=停止 0001/0002/0003=非标准高位字节 ffff/5a5a=边界。
+
+# --- 值集单发探针:对 known-good 可读特征写各 CCCD 语义值 ---
+- id: cc-sem-0000
+  layer: cccd
+  op: write_req
+  handle: "${value}"
+  value_hex: "0000"
+
+- id: cc-sem-0100
+  layer: cccd
+  op: write_req
+  handle: "${value}"
+  value_hex: "0100"
+
+- id: cc-sem-0200
+  layer: cccd
+  op: write_req
+  handle: "${value}"
+  value_hex: "0200"
+
+- id: cc-sem-0300
+  layer: cccd
+  op: write_req
+  handle: "${value}"
+  value_hex: "0300"
+
+- id: cc-sem-0001
+  layer: cccd
+  op: write_req
+  handle: "${value}"
+  value_hex: "0001"
+
+- id: cc-sem-0002
+  layer: cccd
+  op: write_req
+  handle: "${value}"
+  value_hex: "0002"
+
+- id: cc-sem-0003
+  layer: cccd
+  op: write_req
+  handle: "${value}"
+  value_hex: "0003"
+
+- id: cc-sem-ffff
+  layer: cccd
+  op: write_req
+  handle: "${value}"
+  value_hex: "ffff"
+
+- id: cc-sem-5a5a
+  layer: cccd
+  op: write_req
+  handle: "${value}"
+  value_hex: "5a5a"
+
+# --- 无通知/指示属性特征直接写 0x0100(核心:栈是否校验"此特性能否通知") ---
+- id: cc-write-nonotify-0100
+  layer: cccd
+  op: write_req
+  handle: "${each.value}"
+  value_hex: "0100"
+  filter: writable
+
+# --- 连写三个不同值(订阅抖动,observe:0 不等通知稳定)+ listen 观察 ---
+- id: cc-jitter-seq
+  layer: cccd
+  steps:
+    - {op: write_req, handle: "${each.value}", value_hex: "0100"}
+    - {op: write_req, handle: "${each.value}", value_hex: "0000"}
+    - {op: write_req, handle: "${each.value}", value_hex: "0100"}
+    - {listen: true, observe: 1.0}
+  filter: writable
+
+# --- 边界 CCCD handle(known-good 邻近)写 0x0100 ---
+- id: cc-write-boundary-m1
+  layer: cccd
+  op: write_req
+  handle: "${value-1}"
+  value_hex: "0100"
+
+- id: cc-write-boundary-p1
+  layer: cccd
+  op: write_req
+  handle: "${value+1}"
+  value_hex: "0100"

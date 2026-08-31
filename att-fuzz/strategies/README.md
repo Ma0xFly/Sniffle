@@ -78,3 +78,32 @@
   状态不符时期望性断链(泵掉 terminate 事件),下一条用例的前置健康检查按
   新状态重连。默认行为(全程协商)不变。
 - 未协商链路上健康检查的基线对比用前缀匹配(响应在 MTU 23 下可能截断)。
+
+## 变异模式(core/mutator.py,runner --rounds)
+
+签名驱动变异:黑盒拿不到 coverage,AFL 式反馈换成响应签名当伪覆盖
+(`signature = 分类|响应opcode|error_code|term_reason|hc异常`,台账 signature 列)。
+
+- **`--rounds N`**:N = 第一轮确定性语料之后追加的变异轮数(默认 0)。
+  `--round-budget B`(默认 100)= 每轮预算用例数,预算耗尽进下一轮或停止。
+- **种子池**:产生新签名的用例 + 全部告警用例(`core.mutator.collect_seeds`),
+  从当前 run 台账累积。
+- **能量调度**(AFL 式,反馈源换成签名):种子能量 = 历史告警加权
+  (告警过的 opcode/handle/layer 高能量)+ 签名新颖度(库中没见过 +3)+
+  重复签名降权(永远同一错误码,`repeat_penalty`)。
+  `SignatureDb` 跨 run 累积于 `att-fuzz/logs/signatures.json`(git 忽略),
+  `scan_runs` 扫所有 run 台账,幂等只增。
+- **变异算子**(不做纯随机字节--乱翻 opcode 退化成未知 opcode 轰炸,与①层重复):
+  - `_flip_params`:bit/byte 翻转**限参数区**(pdu[1:]),不碰 opcode 字节;
+  - `_boundary`:handle/offset 边界邻近变异(±1/±2/×2 及 0x0000/0xFFFF 等边界间跳);
+  - `_random_len`:随机长度插值([0, MTU-3],值确定性 incremental);
+  - `_timing`:gate_at 随机化(打散到不同连接事件)+ 同事件多发(两条 PDU 同 gate_at,
+    复现 SweynTooth 类死锁)。
+  每种子随机组合 1-2 个非时序算子 + 概率加时序算子。
+- **case_id 命名**:`mut-r<round>-<n>`,同 seed 同地图逐字节一致(可 replay)。
+- **时序门控**:`CaseStep.gate_at`(相对注入时刻 cur_event 的偏移,None=不门控;
+  同值 = 同事件多发)。`run_sequence` 注入时转绝对 `cur_event + gate_at`,
+  台账步骤与 replay 记录相对偏移,`--replay-case` 按门控序列重放。
+- **变异轮即长会话**:长会话累积(~900 event)+ 队列压力才触发 ATT 冻结,
+  变异轮天然是长会话,ATT_FREEZE 是高价值猎物。
+

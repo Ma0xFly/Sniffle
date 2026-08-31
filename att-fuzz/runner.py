@@ -53,6 +53,10 @@ def main():
                     help="只连接 + 发现,输出 GATT 地图后退出")
     ap.add_argument("--probe", action="store_true",
                     help="扫描诊断:目标是否在广播 + 地址类型(不连接)")
+    ap.add_argument("--rounds", type=int, default=0,
+                    help="追加变异轮数(0=纯确定性语料;N>0 在第一轮后进入签名驱动变异)")
+    ap.add_argument("--round-budget", type=int, default=100,
+                    help="每轮变异预算用例数(默认 100,预算耗尽进下一轮)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -102,7 +106,9 @@ def main():
                                   seed=args.seed, max_cases=args.max_cases,
                                   replay_pdu=args.replay,
                                   replay_expect=args.replay_expect,
-                                  replay_steps=args.replay_steps))
+                                  replay_steps=args.replay_steps,
+                                  rounds=args.rounds,
+                                  round_budget=args.round_budget))
     except SerialBusy as e:
         raise SystemExit("error: %s" % e)
 

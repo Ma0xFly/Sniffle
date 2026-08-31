@@ -180,3 +180,46 @@ assert "case_kind" not in rows[0] and "steps" not in rows[0]
 assert rows[1]["case_kind"] == "sequence" and rows[1]["alert_step"] == 1
 assert rows[1]["replay"]["kind"] == "sequence"
 print("序列用例展开 + 台账扩展自测全部通过")
+
+# 5) 变异引擎:确定性 + 签名库持久化 + 算子性质
+from core.mutator import Mutator, SeedCase, SignatureDb
+
+_mtmp = Path(tempfile.mkdtemp())
+_db = SignatureDb(_mtmp / "signatures.json")
+_seed = SeedCase(case_id="seed-read", layer="handle",
+                 steps=[CaseStep(pdu=bytes([0x0A, 0x03, 0x00]),
+                                 expect_response=True, op="read_req")],
+                 signature="TIMEOUT", opcode=0x0A, handle=3)
+
+# 确定性:同 seed 同地图 -> 变异序列逐字节一致
+_m1 = Mutator(_db, seed=11, mtu=247)
+_m2 = Mutator(_db, seed=11, mtu=247)
+_c1 = _m1.mutate(_seed, round_no=1)
+_c2 = _m2.mutate(_seed, round_no=1)
+assert _c1.id == _c2.id and _c1.layer == _c2.layer
+assert [s.pdu for s in _c1.steps] == [s.pdu for s in _c2.steps]
+assert [s.gate_at for s in _c1.steps] == [s.gate_at for s in _c2.steps]
+
+# 算子不碰 opcode 字节(参数区翻转/边界/长度/时序追加均不改 opcode)
+for _c in (_c1, _c2):
+    for s in _c.steps:
+        if s.pdu:
+            assert s.pdu[0] == 0x0A, s.pdu.hex()   # 种子 read_req opcode 保持
+
+# 签名库持久化(跨 run 累积)
+_db.add("TIMEOUT")
+_db.alert_opcode[0x1F] = 4
+_db.save()
+_db2 = SignatureDb(_mtmp / "signatures.json")
+assert "TIMEOUT" in _db2.signatures and _db2.alert_opcode.get(0x1F) == 4
+assert _db2.is_new("HEALTH_DEGRADED|rsp=0x01")     # 未见 -> 新签名
+assert _db2.repeat_penalty("TIMEOUT") > 0          # 重复签名降权
+assert _db2.energy_bonus(0x1F, 3, "opcode") > _db2.energy_bonus(0x0A, 3, "opcode")
+
+# 同事件多发算子:多跑总能出现两条 PDU 同 gate_at 的变异
+_m3 = Mutator(_db, seed=99, mtu=247)
+_multi = [_m3.mutate(_seed, round_no=i).steps for i in range(2, 62)]
+_same = [st for st in _multi if len(st) >= 2 and st[0].gate_at is not None
+         and st[0].gate_at == st[1].gate_at]
+assert _same, "同事件多发算子未触发"
+print("变异引擎自测全部通过")

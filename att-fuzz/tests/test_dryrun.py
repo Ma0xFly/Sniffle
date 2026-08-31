@@ -382,6 +382,43 @@ def main():
     assert "post_hc=value_changed" in r.notes, r.notes
     print("分类: 值异常读场景 -> HEALTH_DEGRADED")
 
+    # ---- 变异轮干跑(rounds=2,小预算)+ 门控序列 replay ----
+    _clean_replay_outdir()
+    central_fuzz.make_transport = fake_make_transport
+    # 隔离签名库:不扫真实 run(其合规 signature 会占满种子判定),用空库 +
+    # 空扫描目录 -> 首轮用例全算"新签名",变异轮有种子可抽。
+    os.environ["ATT_FUZZ_SIGDB"] = str(REPO / "att-fuzz" / "logs" / "dryrun-sigdb.json")
+    os.environ["ATT_FUZZ_SIGSCAN"] = str(REPO / "att-fuzz" / "logs" / "dryrun-sigscan")
+    Path(os.environ["ATT_FUZZ_SIGSCAN"]).mkdir(parents=True, exist_ok=True)
+    try:
+        # 首轮用 opcodes.yaml:未知 opcode 在 FakeHw 回 error 0x06(历史真实库没有该
+        # 组合) -> 新签名种子,变异轮才有种子可抽。
+        rc = central_fuzz.run(target, [REPO / "att-fuzz" / "strategies" / "opcodes.yaml"],
+                              outdir_r, seed=3, max_cases=10, rounds=2,
+                              round_budget=6)
+        assert rc == 0
+        recs_mut = [j.loads(l) for l in (outdir_r / "ledger.jsonl").open()]
+        muts = [r for r in recs_mut if r["case_id"].startswith("mut-")]
+        assert muts, "变异轮未产生用例"
+        sigs = set(r.get("signature") for r in recs_mut if r.get("signature"))
+        assert sigs, "无签名产出"
+        gated = [r for r in muts if any(s.get("gate_at") is not None
+                                        for s in (r.get("steps") or []))]
+        print("变异轮: %d 变异用例, %d 含门控, 签名 %d 种"
+              % (len(muts), len(gated), len(sigs)))
+        # 门控序列 replay:按台账 gate_at 序列逐步重放
+        if gated:
+            g = gated[0]
+            rc = central_fuzz.run(target, [], outdir_r, seed=3,
+                                  replay_steps=g["replay"]["steps"])
+            assert rc == 0
+            rr = Ledger(outdir_r / "ledger.jsonl").find("replay")
+            assert rr["case_kind"] == "sequence", rr
+            assert rr["replay"]["kind"] == "sequence"
+            print("门控 replay 回归: 序列逐步重放 OK (%d 步)" % len(rr["steps"]))
+    finally:
+        central_fuzz.make_transport = orig
+
     print("FakeHw 干跑测试全部通过")
 
 

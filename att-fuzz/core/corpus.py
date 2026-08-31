@@ -75,11 +75,14 @@ def eval_expr(expr, variables: dict):
 
 @dataclass
 class CaseStep:
-    """序列用例的单步。pdu 已按锚点构造;op 仅为台账可读性记录。"""
+    """序列用例的单步。pdu 已按锚点构造;op 仅为台账可读性记录。
+    gate_at: 时序门控的相对偏移(相对注入时刻 cur_event;None=不门控)。
+    同值 = 同事件多发;不同值 = 打散到不同连接事件。"""
     pdu: bytes
     expect_response: bool = True
     observe: float = 0.0        # 步间观察窗(秒):等潜在迟滞显现再走下一步
     op: str | None = None
+    gate_at: int | None = None
 
 
 @dataclass
@@ -205,8 +208,9 @@ def _build_step(step_raw: dict, v: dict, seed, case_id: str, idx: int) -> CaseSt
     if expect is None:
         expect = op != "write_cmd"
     observe = float(step_raw.get("observe", 0) or 0)
+    gate_at = int(step_raw["gate_at"]) if "gate_at" in step_raw else None
     return CaseStep(pdu=pdu, expect_response=bool(expect), observe=observe,
-                    op=op or "raw")
+                    op=op or "raw", gate_at=gate_at)
 
 
 def _flatten_steps(raw_steps: list) -> list:

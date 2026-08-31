@@ -257,7 +257,8 @@ class FuzzSession:
 
         for idx, step in enumerate(steps):
             row = {"step": idx, "op": step.op,
-                   "expect_response": step.expect_response}
+                   "expect_response": step.expect_response,
+                   "gate_at": step.gate_at}
             # 纯监听观察步:不等 ATT 响应,经事件流收集对端发来的通知/指示
             if step.op == "__listen__":
                 collected = []
@@ -295,7 +296,9 @@ class FuzzSession:
             rsp = None
             transport_err = None
             try:
-                self.t.inject(step.pdu)
+                gate_at = (self.t.cur_event + step.gate_at) \
+                    if step.gate_at is not None else None
+                self.t.inject(step.pdu, gate_at=gate_at)
                 row["event"] = self.t.cur_event
                 if step.expect_response:
                     rsp = self.t.recv_att(timeout)

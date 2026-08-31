@@ -489,6 +489,32 @@ class SniffleTransport:
         self._log_event("inject", pdu=att_pdu.hex(), gate_at=gate_at,
                         frags=len(frags), event=self.cur_event)
 
+    def inject_raw(self, fragments: list, gate_at: int | None = None):
+        """原始 LL 帧序列注入(L2CAP 帧欺骗用)。fragments: [(llid, payload_bytes), ...],
+        payload 含自构的 L2CAP 头(长度可谎报)。不做头构造/分片,只做 TX 限速与(可选)
+        门控;LLID 语义由调用方决定。保持 inject 行为不变。"""
+        if not self._link_up:
+            raise TransportError("not connected")
+        self._wait_tx_room(len(fragments))
+        ts = time.time()
+        for llid, payload in fragments:
+            if gate_at is None:
+                self.hw.cmd_transmit(llid, payload, self.cur_event & 0xFFFF)
+            else:
+                if gate_at < self._last_gate_at:
+                    raise TransportError(
+                            "gate_at must be monotonic: %d after %d" %
+                            (gate_at, self._last_gate_at))
+                self.hw.cmd_transmit_at(llid, payload, gate_at)
+                self._last_gate_at = gate_at
+            # pcap 每分片一条记录(LL 头:LLID + 长度)
+            self._pcap_tx(bytes([llid, len(payload)]) + payload, ts)
+        self._tx_pending += len(fragments)
+        self._tx_watermark_event = self.cur_event
+        self._tx_last_time = time.monotonic()
+        self._log_event("inject_raw", frags=len(fragments), gate_at=gate_at,
+                        event=self.cur_event)
+
     def _effective_pending(self) -> int:
         if self.cur_event > self._tx_watermark_event:
             self._tx_pending = 0       # 事件号推进过 => 队列必然已出

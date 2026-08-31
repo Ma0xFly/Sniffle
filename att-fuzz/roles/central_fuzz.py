@@ -60,11 +60,19 @@ def _run_locked(target, strategy_paths, outdir, serport, seed,
 
     # -- replay 模式:注入指定 PDU/序列(hex),单发即止 --
     if replay_steps:
-        steps = [CaseStep(pdu=bytes.fromhex(s["pdu"]),
-                          expect_response=bool(s.get("expect_response", True)),
-                          observe=float(s.get("observe", 0) or 0),
-                          gate_at=int(s["gate_at"]) if s.get("gate_at") is not None else None)
-                 for s in replay_steps]
+        steps = []
+        for s in replay_steps:
+            if s.get("frames"):
+                steps.append(CaseStep(pdu=b"", expect_response=True,
+                                      raw_frames=[(f["llid"],
+                                                   bytes.fromhex(f["payload"]))
+                                                  for f in s["frames"]]))
+            else:
+                steps.append(CaseStep(pdu=bytes.fromhex(s.get("pdu", "")),
+                                      expect_response=bool(s.get("expect_response", True)),
+                                      observe=float(s.get("observe", 0) or 0),
+                                      gate_at=int(s["gate_at"])
+                                      if s.get("gate_at") is not None else None))
         log.info("replaying sequence: %d steps", len(steps))
         r = session.run_sequence("replay", "replay", steps,
                                  replay_ctx={"kind": "sequence",
@@ -128,14 +136,22 @@ def _run_locked(target, strategy_paths, outdir, serport, seed,
             # 用例可能要求未协商链路(⑤层):按需切换连接协商状态
             session.ensure_negotiation(not case.meta.get("no_mtu_negotiate", False))
             if case.steps is not None:
+                step_ctx = []
+                for s in case.steps:
+                    if s.raw_frames is not None:
+                        step_ctx.append({"frames": [{"llid": llid,
+                                                     "payload": payload.hex()}
+                                                    for llid, payload in s.raw_frames],
+                                         "expect_response": s.expect_response,
+                                         "observe": s.observe, "gate_at": s.gate_at})
+                    else:
+                        step_ctx.append({"pdu": s.pdu.hex(),
+                                         "expect_response": s.expect_response,
+                                         "observe": s.observe,
+                                         "gate_at": s.gate_at})
                 r = session.run_sequence(
                         case.id, case.layer, case.steps,
-                        replay_ctx={"kind": "sequence",
-                                    "steps": [{"pdu": s.pdu.hex(),
-                                               "expect_response": s.expect_response,
-                                               "observe": s.observe,
-                                               "gate_at": s.gate_at}
-                                              for s in case.steps]})
+                        replay_ctx={"kind": "sequence", "steps": step_ctx})
             else:
                 expect = case.meta.get("op") != "write_cmd"
                 r = session.run_case(case.id, case.layer,

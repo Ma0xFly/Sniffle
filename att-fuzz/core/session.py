@@ -290,7 +290,10 @@ class FuzzSession:
                 if dropped is not None:
                     break
                 continue
-            row.update(self._case_fields(step.pdu))
+            row.update(self._case_fields(step.pdu) if step.pdu else {})
+            if step.raw_frames is not None:
+                row["frames"] = [{"llid": llid, "payload": payload.hex()}
+                                 for llid, payload in step.raw_frames]
             notes = []
             cls = None
             rsp = None
@@ -298,7 +301,10 @@ class FuzzSession:
             try:
                 gate_at = (self.t.cur_event + step.gate_at) \
                     if step.gate_at is not None else None
-                self.t.inject(step.pdu, gate_at=gate_at)
+                if step.raw_frames is not None:
+                    self.t.inject_raw(step.raw_frames, gate_at=gate_at)
+                else:
+                    self.t.inject(step.pdu, gate_at=gate_at)
                 row["event"] = self.t.cur_event
                 if step.expect_response:
                     rsp = self.t.recv_att(timeout)

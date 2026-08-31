@@ -77,12 +77,15 @@ def eval_expr(expr, variables: dict):
 class CaseStep:
     """序列用例的单步。pdu 已按锚点构造;op 仅为台账可读性记录。
     gate_at: 时序门控的相对偏移(相对注入时刻 cur_event;None=不门控)。
-    同值 = 同事件多发;不同值 = 打散到不同连接事件。"""
+    同值 = 同事件多发;不同值 = 打散到不同连接事件。
+    raw_frames: L2CAP 帧欺骗步,与 pdu 互斥——原始 LL 帧序列 [(llid, payload), ...],
+    payload 含自构 L2CAP 头(长度可谎报)。"""
     pdu: bytes
     expect_response: bool = True
     observe: float = 0.0        # 步间观察窗(秒):等潜在迟滞显现再走下一步
     op: str | None = None
     gate_at: int | None = None
+    raw_frames: list | None = None
 
 
 @dataclass
@@ -199,6 +202,13 @@ def _build_step(step_raw: dict, v: dict, seed, case_id: str, idx: int) -> CaseSt
         return CaseStep(pdu=b"", expect_response=False,
                         observe=float(step_raw.get("observe", 1.0) or 1.0),
                         op="__listen__")
+    # L2CAP 帧欺骗步:raw: [{llid, payload}, ...],payload 含自构 L2CAP 头(hex)
+    if "raw" in step_raw:
+        frames = [(int(f["llid"]), bytes.fromhex(f["payload"]))
+                  for f in step_raw["raw"]]
+        return CaseStep(pdu=b"", expect_response=True,
+                        observe=float(step_raw.get("observe", 0) or 0),
+                        op="raw_frames", raw_frames=frames)
     op = step_raw.get("op")
     if op is None:
         pdu = bytes.fromhex(step_raw["payload"])
@@ -372,11 +382,21 @@ def expand(raw_cases: list, gatt: GattMap, mtu: int, seed: int,
     # PDU 去重:字节相同的用例对目标而言是同一个输入,结果必然相同,
     # 只保留首条(不同模板在边界处常撞出相同字节,白烧健康检查+连接事件)。
     # 序列用例按全步 PDU 组合去重(首步撞车不代表序列相同);
-    # 未协商链路(no_mtu_negotiate)上的用例语义不同,不与协商链路的同字节用例判重。
+    # 未协商链路(no_mtu_negotiate)上的用例语义不同,不与协商链路的同字节用例判重;
+    # raw_frames 步按帧序列参与去重(其 pdu 为空,须用帧内容否则全撞车)。
     seen, deduped = set(), []
     for c in out:
-        body = "seq|" + "|".join(s.pdu.hex() for s in c.steps) \
-            if c.steps is not None else c.pdu.hex()
+        if c.steps is not None:
+            parts = []
+            for s in c.steps:
+                if s.raw_frames is not None:
+                    parts.append("raw|" + "|".join(
+                        "%d:%s" % (llid, p.hex()) for llid, p in s.raw_frames))
+                else:
+                    parts.append(s.pdu.hex())
+            body = "seq|" + "|".join(parts)
+        else:
+            body = c.pdu.hex()
         key = ("nonneg|" + body) if c.meta.get("no_mtu_negotiate") else body
         if key in seen:
             continue

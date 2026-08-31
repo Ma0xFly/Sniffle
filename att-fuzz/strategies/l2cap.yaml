@@ -1,0 +1,44 @@
+# L2CAP SDU 帧欺骗(攻击 transport 自动打包之下的 LL/L2CAP 边界)。
+# 平台事实:固件无 L2CAP 层,重组在 host 侧;目标栈按 L2CAP 头声明长度重组 SDU。
+# 收方向:谎报的帧头让目标分配错误缓冲/等待不存在的字节。
+# 帧格式:raw: [{llid, payload}],payload 含自构 L2CAP 头(len 2LE + cid 2LE=0400) + ATT。
+# 这些用例预期产生 TIMEOUT/ATT_FREEZE/掉链(协议外信号全靠目标行为暴露)。
+
+# 声明长度(16) > 实际 ATT 字节(1):目标等 16 字节 SDU,续条不足 -> 半截等待
+- id: l2-over-declare
+  layer: l2cap
+  steps:
+    - {raw: [{llid: 2, payload: "100004000a"}], observe: 0.5}
+
+# 声明长度(2) < 实际(3 字节 ATT) + 多余续条字节
+- id: l2-under-declare
+  layer: l2cap
+  steps:
+    - {raw: [{llid: 2, payload: "020004000a0300"},
+             {llid: 1, payload: "aabbcc"}], observe: 0.5}
+
+# 只发续条(LLID=1,无起始帧):目标重组器无起始状态
+- id: l2-cont-only
+  layer: l2cap
+  steps:
+    - {raw: [{llid: 1, payload: "050004000a0300"}], observe: 0.5}
+
+# 只发起始帧无续条(半截 SDU):声明 256 字节,仅 1 字节 ATT,目标永久等待
+- id: l2-half-sdu
+  layer: l2cap
+  steps:
+    - {raw: [{llid: 2, payload: "000104000a"}], observe: 0.5}
+
+# 超长声明流式灌包:声明 0xFF00(接近 65535 上限),连发 8 帧续条,考验重组缓冲上限
+- id: l2-huge-declare
+  layer: l2cap
+  steps:
+    - {raw: [{llid: 2, payload: "00ff04000a0300"},
+             {llid: 1, payload: "4142"},
+             {llid: 1, payload: "4344"},
+             {llid: 1, payload: "4546"},
+             {llid: 1, payload: "4748"},
+             {llid: 1, payload: "494a"},
+             {llid: 1, payload: "4b4c"},
+             {llid: 1, payload: "4d4e"},
+             {llid: 1, payload: "4f50"}], observe: 0.5}

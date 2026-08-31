@@ -144,6 +144,12 @@ class FakeHw:
 
     def _on_att(self, att):
         op = att[0]
+        # 畸形/半截 PDU(如 L2CAP 欺骗)防御:长度不足按 INVALID_PDU 回 error,
+        # 不崩(真实 server 对短 PDU 会回错或忽略)。
+        _minlen = {0x02: 3, 0x10: 7, 0x08: 7, 0x04: 5, 0x0A: 3, 0x12: 3,
+                   0x52: 3, 0x0C: 5, 0x16: 5, 0x18: 2}
+        if len(att) < _minlen.get(op, 1):
+            return self._error(op, 0x0000, 0x04)
         if op == 0x02:      # Exchange MTU
             self._emit_att(bytes([0x03]) + pack("<H", SERVER_MTU))
         elif op == 0x10:     # Read By Group Type
@@ -249,8 +255,11 @@ def main():
     import contextlib
     central_fuzz.serial_guard = lambda *a, **k: contextlib.nullcontext()
     try:
-        rc = central_fuzz.run(target, [REPO / "att-fuzz" / "strategies"], outdir,
-                              seed=7, max_cases=0)
+        # 大跑用除 l2cap.yaml 外全部策略:l2cap 欺骗用例故意产生 TIMEOUT/冻结,
+        # 属预期信号,单独跑(见文末);大跑断言保持"FakeHw 行为正确不应有告警"。
+        all_strats = sorted(p for p in (REPO / "att-fuzz" / "strategies").glob("*.yaml")
+                            if p.name != "l2cap.yaml")
+        rc = central_fuzz.run(target, all_strats, outdir, seed=7, max_cases=0)
     finally:
         central_fuzz.make_transport = orig
     assert rc == 0
@@ -416,6 +425,60 @@ def main():
             assert rr["case_kind"] == "sequence", rr
             assert rr["replay"]["kind"] == "sequence"
             print("门控 replay 回归: 序列逐步重放 OK (%d 步)" % len(rr["steps"]))
+    finally:
+        central_fuzz.make_transport = orig
+
+    # ---- L2CAP 帧欺骗:raw 注入逃逸口单元测试 + 单独跑 l2cap.yaml ----
+    class RecHw(FakeHw):
+        """记录 cmd_transmit/at 收到的原始帧(验证 inject_raw 原样透传)。"""
+        def __init__(self):
+            super().__init__()
+            self.sent = []
+            self.sent_at = []
+        def cmd_transmit(self, llid, pdu, event=0):
+            self.sent.append((llid, bytes(pdu)))
+            super().cmd_transmit(llid, pdu, event)
+        def cmd_transmit_at(self, llid, pdu, event):
+            self.sent_at.append((llid, bytes(pdu), event))
+            super().cmd_transmit_at(llid, pdu, event)
+
+    rhw = RecHw()
+    rt = SniffleTransport(rhw, jsonl_path=None, conn_interval_units=12)
+    # 连接(RecHw 继承 FakeHw,respond 正常)
+    rt.connect(target)
+    rt.setup_data_size()
+    # 谎报 L2CAP 头(声明 16 字节,实际 ATT 1 字节)原样透传,transport 不代头
+    raw_frames = [(2, bytes.fromhex("100004000a")),
+                  (1, bytes.fromhex("4142"))]
+    rt.inject_raw(raw_frames)
+    assert rhw.sent[-2:] == raw_frames, rhw.sent   # 原样帧序列
+    # gate_at 门控透传
+    rt.inject_raw([(2, bytes.fromhex("100004000a"))], gate_at=5)
+    assert rhw.sent_at and rhw.sent_at[-1][2] == 5, rhw.sent_at
+    print("raw 注入单元: 帧序列原样透传 + gate_at 门控 OK")
+
+    # l2cap.yaml 单独跑:欺骗用例在 FakeHw 上跑通,产出的 TIMEOUT 是预期信号
+    _clean_replay_outdir()
+    central_fuzz.make_transport = fake_make_transport
+    try:
+        rc = central_fuzz.run(target, [REPO / "att-fuzz" / "strategies" / "l2cap.yaml"],
+                              outdir_r, seed=2, max_cases=0)
+        assert rc == 0
+        recs_l2 = [j.loads(l) for l in (outdir_r / "ledger.jsonl").open()]
+        assert recs_l2, "l2cap 用例未执行"
+        l2_alert = [r for r in recs_l2 if r["classification"] in
+                    ("TIMEOUT", "ATT_FREEZE", "DISCONNECT_TERM", "DISCONNECT_SUP")]
+        print("l2cap 欺骗: %d 用例, %d 异常信号(TIMEOUT/冻结/掉链,预期)"
+              % (len(recs_l2), len(l2_alert)))
+        # replay:含 raw 帧的用例按 frames 序列重放
+        rawrec = next((r for r in recs_l2 if any("frames" in s for s in (r.get("steps") or []))), None)
+        if rawrec:
+            rc = central_fuzz.run(target, [], outdir_r, seed=2,
+                                  replay_steps=rawrec["replay"]["steps"])
+            assert rc == 0
+            rr = Ledger(outdir_r / "ledger.jsonl").find("replay")
+            assert rr["case_kind"] == "sequence", rr
+            print("raw replay 回归: 帧序列逐步重放 OK")
     finally:
         central_fuzz.make_transport = orig
 

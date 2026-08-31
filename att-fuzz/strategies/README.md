@@ -107,3 +107,22 @@
 - **变异轮即长会话**:长会话累积(~900 event)+ 队列压力才触发 ATT 冻结,
   变异轮天然是长会话,ATT_FREEZE 是高价值猎物。
 
+## L2CAP 帧欺骗与 raw 注入
+
+平台事实:固件全链路无 L2CAP 层,分片/重组/MTU 跟踪全在 host 侧
+(`transport._L2capReassembly`);单帧 ATT PDU ≤247,`transport.inject` 自动包
+4 字节 L2CAP 头并真实计算长度。**收方向**(发向目标)是攻击对象——目标栈按
+L2CAP 头声明长度重组 SDU,谎报帧头可让它分配错误缓冲/等待不存在的字节。
+
+- **`transport.inject_raw(fragments, gate_at=None)`**:原始 LL 帧序列注入,
+  `fragments = [(llid, payload_bytes), ...]`,payload 含自构 L2CAP 头(长度可谎报)。
+  只做 TX 限速与(可选)门控,不代头、不分片;`inject` 行为不变。
+- **用例格式**(`strategies/l2cap.yaml`):序列步用 `raw` 字段,
+  `{raw: [{llid: 2, payload: "<hex 含 L2CAP 头>"}, {llid: 1, ...}], observe: N}`。
+  L2CAP 头 = len(2 小端) + cid(2 小端,ATT=0x0004) + ATT。
+- **欺骗形态**:声明长度 > 实际(半截 SDU 等待)、< 实际(多余续条)、只发续条
+  (LLID=1 无起始)、只发起始帧无续条、超长声明流式灌包(接近 65535)。
+- **oracle**:目标对协议外信号的行为——TIMEOUT/ATT_FREEZE(链路存活无响应)/
+  掉链。台账步骤记录 `frames`(llid+payload hex),`--replay-case` 按帧序列重放。
+
+

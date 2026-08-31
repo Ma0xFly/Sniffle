@@ -1,0 +1,96 @@
+# 语料补强:发现类 opcode 区间边界 + Read Multiple 句柄表边界
+# (与 handles.yaml 已有的 inverted/zero-range 互补,这里补全区间/全 1/真实邻域跨界)
+
+# --- 发现类区间补强 ---
+- id: d-findinfo-fullrange
+  layer: discovery
+  op: find_info_req
+  start: 1
+  end: 0xFFFF
+
+- id: d-findinfo-allones
+  layer: discovery
+  op: find_info_req
+  start: 0xFFFF
+  end: 0xFFFF
+
+- id: d-findinfo-real-cross
+  layer: discovery
+  op: find_info_req
+  start: "${value}"
+  end: "${value+1}"
+
+- id: d-findinfo-real-m1
+  layer: discovery
+  op: find_info_req
+  start: "${value-1}"
+  end: "${value}"
+
+- id: d-rbt-fullrange
+  layer: discovery
+  op: read_by_type_req
+  start: 1
+  end: 0xFFFF
+  uuid: 0x2803
+
+- id: d-rbt-allones
+  layer: discovery
+  op: read_by_type_req
+  start: 0xFFFF
+  end: 0xFFFF
+  uuid: 0x2803
+
+- id: d-rbt-real-cross
+  layer: discovery
+  op: read_by_type_req
+  start: "${value}"
+  end: "${value+1}"
+  uuid: 0x2803
+
+- id: d-rbgt-fullrange
+  layer: discovery
+  op: read_by_group_type_req
+  start: 1
+  end: 0xFFFF
+  uuid: 0x2800
+
+- id: d-rbgt-allones
+  layer: discovery
+  op: read_by_group_type_req
+  start: 0xFFFF
+  end: 0xFFFF
+  uuid: 0x2800
+
+- id: d-rbgt-real-cross
+  layer: discovery
+  op: read_by_group_type_req
+  start: "${value}"
+  end: "${value+1}"
+  uuid: 0x2800
+
+# --- Read Multiple 句柄表边界 ---
+- id: d-rm-empty
+  layer: discovery
+  op: read_multiple_req
+  handles: []            # 空表(只有 opcode 0x0E)
+
+- id: d-rm-dup
+  layer: discovery
+  op: read_multiple_req
+  handles: [3, 3]        # 重复句柄
+
+- id: d-rm-many
+  layer: discovery
+  op: read_multiple_req
+  handles: [3, 5, 7, 12, 13, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44]
+  # 20 句柄长表(40 字节);超 MTU 的更长表由变异引擎 random_len 覆盖
+
+- id: d-rm-odd-half
+  layer: discovery
+  opcode: 0x0E           # Read Multiple 裸 opcode + 奇数半 handle(字节级原始注入)
+  payload: "03"
+
+- id: d-rm-odd-many
+  layer: discovery
+  opcode: 0x0E
+  payload: "030500070c0d"    # 奇数长度句柄表(3 字节半)

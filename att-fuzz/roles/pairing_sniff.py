@@ -100,14 +100,18 @@ def _run_locked(target, outdir, serport, duration, mac_override,
                              phy_preload=PhyMode.PHY_2M,
                              pause_done=False, validate_crc=True)
         else:
+            # 定向驻留(--sniff-mac 给定):MAC 过滤 + 固定 ch37 不跳(hop3=False)。
+            # 实测依据:耳机配对广播 86.7% 在 ch37(ch39 13.3%/ch38 ~0),hop3 的
+            # 跳变窗口恰是 CONNECT_IND 被漏的窗口(实测 2 中 1);驻留 ch37 对
+            # 主信道确定性覆盖,无跳变空窗。
             hw.setup_sniffer(mode=SnifferMode.CONN_FOLLOW, chan=37,
-                             targ_mac=wire_mac, hop3=True, ext_adv=False,
+                             targ_mac=wire_mac, hop3=False, ext_adv=False,
                              coded_phy=False, rssi_min=-128, interval_preload=[],
                              phy_preload=PhyMode.PHY_2M,
                              pause_done=False, validate_crc=True)
 
     mode_desc = "hunt(无MAC过滤+extadv)" if hunt else \
-                "targeted(mac=%s hop3)" % (wire_mac.hex() if wire_mac else "?")
+                "park(mac=%s 驻留ch37)" % (wire_mac.hex() if wire_mac else "?")
     log.info("sniff mode: %s, pause_done=False(断连继续跟随)", mode_desc)
     _setup()
     hw.mark_and_flush()

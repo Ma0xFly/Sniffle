@@ -18,8 +18,11 @@
 - 计数器:每方向独立,空包也推进(重传靠 SN 位 + MIC 验证兜底)。
 
 用法(经 runner.py):
-  python3 att-fuzz/runner.py --target att-fuzz/targets/vivo_tws.json --sniff-pairing
-  --sniff-duration 180 [--sniff-mac AA:BB:..]   # 覆盖目标档案 MAC
+  python3 att-fuzz/runner.py --target ... --sniff-pairing --sniff-duration 180 \
+      [--sniff-mac AA:BB:..] [--phone-mac AA:BB:..]
+  --sniff-mac 省略 = 猎取模式(默认):无 MAC 过滤 + extadv 跟扩展广播 aux 链,
+  每条 CONNECT_IND 落台账(--phone-mac 标记手机发起的配对连接)。
+  --sniff-mac 给定 = 定向模式:MAC 过滤 + hop3,只抓连到该地址的 CONNECT_IND。
 """
 
 import json
@@ -60,30 +63,53 @@ def _parse_mac(mac_str) -> bytes:
 
 
 def run(target: dict, outdir: Path, serport=None, duration: float = 0.0,
-        mac: str | None = None) -> int:
+        mac: str | None = None, phone_mac: str | None = None) -> int:
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     serport = serport or target.get("serport")
     with serial_guard(serport, "CLI pairing_sniff(被动嗅探)"):
-        return _run_locked(target, outdir, serport, duration, mac)
+        return _run_locked(target, outdir, serport, duration, mac, phone_mac)
 
 
-def _run_locked(target, outdir, serport, duration, mac_override) -> int:
+# 串口 desync 自愈参数(上轮实测:XDS110/UART 丢字节引发 decode error 连环 + pyserial
+# "no data",pcap 与台账一起断粮):10 秒窗口内 decode error >= 阈值即复位重同步。
+DESYNC_WINDOW_S = 10.0
+DESYNC_THRESHOLD = 10
+
+
+def _run_locked(target, outdir, serport, duration, mac_override,
+                phone_mac=None) -> int:
     hw = make_sniffle_hw(serport)
-    # 目标 MAC:覆盖优先,否则档案 mac,search_string 兜底(照 sniff_receiver)
-    if mac_override:
-        wire_mac = _parse_mac(mac_override)
-    elif target.get("mac"):
-        wire_mac = _parse_mac(target["mac"])
-    else:
-        wire_mac = _find_target_by_string(hw, target["search_string"].encode("latin-1"))
-
-    log.info("sniff target wire-mac=%s (CONN_FOLLOW)", wire_mac.hex())
     from sniffle.sniffle_hw import SnifferMode
-    hw.setup_sniffer(mode=SnifferMode.CONN_FOLLOW, chan=37, targ_mac=wire_mac,
-                     hop3=True, ext_adv=False, coded_phy=False, rssi_min=-128,
-                     interval_preload=[], phy_preload=PhyMode.PHY_2M,
-                     pause_done=True, validate_crc=True)
+
+    # 两种模式:
+    # - 定向模式(--sniff-mac 给定):MAC 过滤 + hop3 跳 37/38/39,只抓连到该地址的
+    #   CONNECT_IND(上轮已验证能抓到,但配对目标地址未知时抓不到)。
+    # - 猎取模式(--sniff-mac 省略,默认):MAC 过滤器全开(hop3 不可用,需目标),
+    #   固件 STATIC 态=ch37 常听 + auxadv 跟扩展广播 aux 链(覆盖 AUX_CONNECT_REQ
+    #   数据信道路径)。每个 ConnectIndMessage 落台账,靠 phone_mac 识别配对连接。
+    hunt = mac_override is None
+    wire_mac = _parse_mac(mac_override) if not hunt else None
+    phone_wire = _parse_mac(phone_mac) if phone_mac else None
+
+    def _setup():
+        if hunt:
+            hw.setup_sniffer(mode=SnifferMode.CONN_FOLLOW, chan=37, targ_mac=None,
+                             hop3=False, ext_adv=True, coded_phy=False,
+                             rssi_min=-128, interval_preload=[],
+                             phy_preload=PhyMode.PHY_2M,
+                             pause_done=False, validate_crc=True)
+        else:
+            hw.setup_sniffer(mode=SnifferMode.CONN_FOLLOW, chan=37,
+                             targ_mac=wire_mac, hop3=True, ext_adv=False,
+                             coded_phy=False, rssi_min=-128, interval_preload=[],
+                             phy_preload=PhyMode.PHY_2M,
+                             pause_done=False, validate_crc=True)
+
+    mode_desc = "hunt(无MAC过滤+extadv)" if hunt else \
+                "targeted(mac=%s hop3)" % (wire_mac.hex() if wire_mac else "?")
+    log.info("sniff mode: %s, pause_done=False(断连继续跟随)", mode_desc)
+    _setup()
     hw.mark_and_flush()
 
     pcap = PcapBleWriter(str(outdir / "capture.pcap"))
@@ -101,8 +127,42 @@ def _run_locked(target, outdir, serport, duration, mac_override) -> int:
         with open(ledger_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    record(kind="sniff_start", target=wire_mac.hex(), duration=duration)
-    log.info("advertising-channel sniffing for target... (手机恢复出厂+重新配对)")
+    record(kind="sniff_start", mode=mode_desc, target=wire_mac.hex() if wire_mac else None,
+           phone_mac=phone_wire.hex() if phone_wire else None, duration=duration)
+    log.info("sniffing... (手机恢复出厂+删除配对后重新配对)")
+
+    # 串口 desync 自愈状态
+    decode_errs = []          # [(t, err)] 时间戳窗口
+    desync_count = [0]
+
+    def _storm_check(t, err):
+        decode_errs.append((t, err))
+        while decode_errs and t - decode_errs[0][0] > DESYNC_WINDOW_S:
+            decode_errs.pop(0)
+        return len(decode_errs) >= DESYNC_THRESHOLD
+
+    def _desync_recover(reason):
+        desync_count[0] += 1
+        gap_start = time.time()
+        log.warning("decode error storm (%s) -- resetting firmware for resync", reason)
+        record(kind="desync_recovery_start", reason=reason,
+               pending_errors=len(decode_errs))
+        decode_errs.clear()
+        try:
+            hw.cmd_reset()
+        except Exception as e:
+            log.warning("cmd_reset failed: %s", e)
+        time.sleep(2.0)
+        # XDS110 复位后 CDC 假就绪:重开串口
+        try:
+            hw.ser.close()
+            hw.ser.open()
+        except Exception as e:
+            log.warning("serial reopen failed: %s", e)
+        _setup()
+        hw.mark_and_flush()
+        record(kind="desync_recovery_done", gap_s=round(time.time() - gap_start, 3))
+        log.info("resync done in %.1fs, continue sniffing", time.time() - gap_start)
 
     try:
         while True:
@@ -113,6 +173,8 @@ def _run_locked(target, outdir, serport, duration, mac_override) -> int:
                 msg = hw.recv_and_decode()
             except Exception as e:
                 log.debug("recv error: %s", e)
+                if _storm_check(time.monotonic(), repr(e)[:60]):
+                    _desync_recover("recv: %s" % repr(e)[:40])
                 continue
             if msg is None:
                 continue
@@ -121,19 +183,24 @@ def _run_locked(target, outdir, serport, duration, mac_override) -> int:
                     dpkt = DPacketMessage.decode(msg)
                 except Exception as e:
                     log.debug("decode error: %s", e)
+                    if _storm_check(time.monotonic(), repr(e)[:60]):
+                        _desync_recover("decode: %s" % repr(e)[:40])
                     continue
                 try:
                     pcap.write_packet_message(dpkt)
                 except Exception:
                     pass
                 if isinstance(dpkt, ConnectIndMessage):
-                    _on_connect(dpkt, ex, state, record, conn_ts)
+                    _on_connect(dpkt, ex, state, record, conn_ts, phone_wire)
                 elif isinstance(dpkt, DataMessage):
                     _on_data(dpkt, ex, state, record, rx)
             elif isinstance(msg, StateMessage):
                 record(kind="state", new=msg.new_state.name, old=msg.last_state.name)
-                # 跟随连接结束(DATA -> PAUSED/STATIC)即一次连接完成
-                if msg.new_state == SnifferState.PAUSED and conn_ts[0] is not None:
+                # 连接跟随结束判定:离开 DATA 态(pause_done=False 下会回
+                # STATIC/ADVERT_SEEK 而不是 PAUSED)即一次连接完成
+                if (msg.last_state == SnifferState.DATA
+                        and msg.new_state != SnifferState.DATA
+                        and conn_ts[0] is not None):
                     _on_disconnect(ex, state, record, conn_ts)
             elif isinstance(msg, MeasurementMessage):
                 # TerminateMeasurement 等量测
@@ -159,7 +226,7 @@ def _run_locked(target, outdir, serport, duration, mac_override) -> int:
     return 0
 
 
-def _on_connect(dpkt, ex, state, record, conn_ts):
+def _on_connect(dpkt, ex, state, record, conn_ts, phone_wire=None):
     ia = bytes(dpkt.InitA); ra = bytes(dpkt.AdvA)
     iat = 1 if dpkt.TxAdd else 0   # InitA 类型
     rat = 1 if dpkt.RxAdd else 0   # AdvA 类型
@@ -169,10 +236,13 @@ def _on_connect(dpkt, ex, state, record, conn_ts):
     state["encrypting"] = False
     state["skdm"] = state["skds"] = state["iv"] = None
     conn_ts[0] = time.time()
-    log.info("conn#%d CONNECT_IND: %s->%s aa=%08X", state["conn_no"],
-             ia.hex(), ra.hex(), dpkt.aa_conn)
+    is_phone = bool(phone_wire and ia == phone_wire)
+    log.info("conn#%d CONNECT_IND: %s->%s aa=%08X%s", state["conn_no"],
+             ia.hex(), ra.hex(), dpkt.aa_conn,
+             " <-- 手机发起(配对连接候选)" if is_phone else "")
     record(kind="connect", aa="%08X" % dpkt.aa_conn, init=ia.hex(), adv=ra.hex(),
-           iat=iat, rat=rat, interval=dpkt.Interval)
+           iat=iat, rat=rat, interval=dpkt.Interval, is_phone=is_phone,
+           ch=dpkt.chan, ts_off=dpkt.ts)
 
 
 def _on_data(dpkt, ex, state, record, rx):
@@ -275,18 +345,3 @@ def _on_disconnect(ex, state, record, conn_ts):
     ex.__init__()
 
 
-def _find_target_by_string(hw, search_str):
-    """主动扫描按广播串找目标 MAC(照 sniff_receiver.get_mac_from_string)。"""
-    from sniffle.sniffle_hw import SnifferMode
-    hw.setup_sniffer(SnifferMode.ACTIVE_SCAN, ext_adv=True)
-    hw.mark_and_flush()
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        msg = hw.recv_and_decode()
-        from sniffle.packet_decoder import (AdvIndMessage, AdvDirectIndMessage,
-                                            ScanRspMessage, AdvExtIndMessage)
-        if isinstance(msg, (AdvIndMessage, AdvDirectIndMessage, ScanRspMessage,
-                            AdvExtIndMessage)) and msg.AdvA is not None:
-            if search_str in msg.body:
-                return bytes(msg.AdvA)
-    raise RuntimeError("target not found by advertisement string: %r" % search_str)

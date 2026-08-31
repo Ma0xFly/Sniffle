@@ -72,7 +72,9 @@ def main():
     ap.add_argument("--sniff-duration", type=float, default=0.0,
                     help="嗅探运行秒数(0=跑到 Ctrl-C)")
     ap.add_argument("--sniff-mac", default=None, metavar="MAC",
-                    help="嗅探目标外设 MAC(书写序 AA:BB:..;缺省用目标档案)")
+                    help="嗅探目标外设 MAC(书写序 AA:BB:..;缺省=猎取模式:无 MAC 过滤+extadv)")
+    ap.add_argument("--phone-mac", default=None, metavar="MAC",
+                    help="用户手机 MAC(书写序):台账里标记手机发起的 CONNECT_IND(配对连接识别)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -119,7 +121,8 @@ def main():
             from roles import pairing_sniff
             sys.exit(pairing_sniff.run(target, outdir, serport=args.serport,
                                        duration=args.sniff_duration,
-                                       mac=args.sniff_mac))
+                                       mac=args.sniff_mac,
+                                       phone_mac=args.phone_mac))
         if args.server:
             from roles import server_fuzz
             sys.exit(server_fuzz.run(target, outdir, serport=args.serport,

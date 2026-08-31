@@ -184,10 +184,3 @@ def _run_locked(outdir: Path, serport, duration: float, name: str,
         log.info("server ledger: %s", ledger_path)
         log.info("pcap:          %s", outdir / "capture.pcap")
     return 0
-
-    @staticmethod
-    def _drain_oracle(record, oracle):
-        for ev in oracle.poll():
-            record(kind="oracle_crash", name=ev.name, context=ev.context,
-                   line=ev.line)
-            log.warning("logcat oracle hit: %s (context=%r)", ev.name, ev.context)

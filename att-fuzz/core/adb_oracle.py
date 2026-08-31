@@ -31,14 +31,24 @@ log = logging.getLogger("att-fuzz.adb_oracle")
 DEFAULT_ADB = os.path.expanduser("~/Android/Sdk/platform-tools/adb")
 
 # (名称, 正则) 蓝牙崩溃/重启特征。命中任一即视为 oracle 事件。
-# 日志正文大小写不固定,统一 IGNORECASE;Zygote 的行是 "Process com.android..."
-# (无冒号),也兼容 "Process: com.android..."。
+# 日志正文大小写不固定,统一 IGNORECASE。实测教训(2026-08-31 真机):
+# - "bt_stack" 是蓝牙栈的普通日志 TAG,裸匹配每行都中 -> 必须同出现
+#   crash/abort/fatal/died 等上下文词才算;
+# - 裸 "tombstone" 会命中 Google 任务名 OdlhTombstonesCleanupJob ->
+#   只认 /data/tombstones/ 或 tombstone_<数字>;
+# - Zygote 的行是 "Process com.android.bluetooth died"(无冒号),也兼容
+#   "Process: com.android..." 格式;Watchdog 的 "Interesting Java process
+#   ... started" 是进程(重)启动信号,单独保留(重启也是 tier2 目标)。
 CRASH_PATTERNS = [
     ("native_crash", re.compile(r"Fatal signal \d+", re.I)),
-    ("tombstone", re.compile(r"/data/tombstones/|tombstone_\d+|tombstone", re.I)),
+    ("tombstone", re.compile(r"/data/tombstones/|tombstone_\d+", re.I)),
     ("java_crash", re.compile(r"Fatal exception", re.I)),
-    ("bt_process_died", re.compile(r"Process\s*:?\s+com\.android\.bluetooth", re.I)),
-    ("bt_crash_trace", re.compile(r"com\.android\.bluetooth.*(?:crash|died)|bt_stack", re.I)),
+    ("bt_process_died", re.compile(
+        r"Process\s*:?\s+com\.android\.bluetooth\s+died", re.I)),
+    ("bt_process_started", re.compile(
+        r"Interesting Java process com\.android\.bluetooth started", re.I)),
+    ("bt_stack_crash", re.compile(
+        r"(?:bt_stack|BluetoothStack).*(?:crash|abort|fatal|killed|died)", re.I)),
     ("system_server_restart", re.compile(
         r"WATCHDOG KILLING SYSTEM PROCESS|System process.*(?:died|restart)", re.I)),
     ("bt_service_restart", re.compile(
@@ -46,12 +56,15 @@ CRASH_PATTERNS = [
     ("bt_anr", re.compile(r"ANR in com\.android\.bluetooth", re.I)),
 ]
 
-# 反例:正常蓝牙流量不该命中的样例行(自检用)
+# 反例:正常蓝牙流量不该命中的样例行(自检用;bt_stack 那行是真实误报样例)
 BENIGN_SAMPLES = [
     "03-03 10:00:00.000  1234  5678 I BluetoothAdapter: startLeScan()",
     "03-03 10:00:01.000  1234  5678 D BluetoothGatt: onConnectionUpdated 20ms",
     "03-03 10:00:02.000  1234  5678 I bt_btif: bta_dm_rm_cback",
     "03-03 10:00:03.000  1234  5678 V BluetoothSocket: connect",
+    "03-03 10:00:04.000  6707  7572 I bt_stack: [INFO:csis_client.cc(1374)] BLE observe complete. Num Resp: 148",
+    "03-03 10:00:05.000  1804  2111 D PowerManagerServiceImpl: wakeLock:[...OdlhTombstonesCleanupJob...] is disabled",
+    "03-03 10:00:06.000  1804  5125 I Watchdog: Interesting Java process com.google.android.gms started. Pid 6964",
 ]
 
 
@@ -101,7 +114,8 @@ class CrashDetector:
             "tombstone": "03-03 10:00:00.000  1234  1234 E DEBUG   : Tombstone written to /data/tombstones/tombstone_00",
             "java_crash": "03-03 10:00:00.000  1234  1234 E AndroidRuntime: FATAL EXCEPTION: main",
             "bt_process_died": "03-03 10:00:00.000  1234  5678 E Zygote  : Process com.android.bluetooth died",
-            "bt_crash_trace": "03-03 10:00:00.000  1234  5678 F bt_stack: CRASH: unexpected state",
+            "bt_process_started": "03-03 10:00:00.000  1804  5125 I Watchdog: Interesting Java process com.android.bluetooth started. Pid 6707",
+            "bt_stack_crash": "03-03 10:00:00.000  6707  7572 F bt_stack: [FATAL:btif_dm.cc(123)] CRASH: unexpected state",
             "system_server_restart": "03-03 10:00:00.000  1234  5678 E watchdog: WATCHDOG KILLING SYSTEM PROCESS: Blocked in handler",
             "bt_service_restart": "03-03 10:00:00.000  1234  5678 I SystemServer: Restarting Bluetooth Service",
             "bt_anr": "03-03 10:00:00.000  1234  5678 E ActivityManager: ANR in com.android.bluetooth",
@@ -164,7 +178,7 @@ class AdbOracle:
             self._proc = subprocess.Popen(
                 [self.adb_path, "-s", self.serial, "logcat", "-v", "threadtime"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                bufsize=1)
+                encoding="utf-8", errors="replace", bufsize=1)
         except Exception as e:
             log.warning("logcat spawn failed: %s, oracle disabled", e)
             return False
@@ -174,13 +188,17 @@ class AdbOracle:
         return True
 
     def _run(self):
-        for line in self._proc.stdout:
-            ev = self.detector.feed(line)
-            if ev is None:
-                continue
-            self._save(ev)
-            with self._lock:
-                self._events.append(ev)
+        try:
+            for line in self._proc.stdout:
+                ev = self.detector.feed(line)
+                if ev is None:
+                    continue
+                self._save(ev)
+                with self._lock:
+                    self._events.append(ev)
+        except Exception as e:
+            # 流结束/解码异常都不该静默杀死 oracle:记日志即可(主循环不受影响)
+            log.warning("logcat reader stopped: %s", e)
 
     def set_context(self, ctx: str | None):
         """设置归因上下文:当前正在测试的响应策略/请求。崩溃事件携带命中瞬间的 context。"""

@@ -1,8 +1,8 @@
 {
   "name": "xisem鼠标",
-  "mac": "D8:E7:79:32:81:90",
+  "mac": "F0:9A:DD:CE:2C:5A",
   "search_string": "",
-  "mac_random": 0,
+  "mac_random": 1,
   "conn_interval": 12,
   "latency": 0,
   "connect_timeout": 10,
@@ -16,5 +16,6 @@
     "latency": "外设延迟;0=每个连接事件必响应,崩溃判定最稳",
     "connect_timeout": "连接超时秒数",
     "pairing": "配对要求;阶段一只支持 none(免配对目标)"
-  }
+  },
+  "_note": "配对模式随机地址,由 mouse_fuzz.py 动态更新"
 }

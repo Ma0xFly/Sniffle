@@ -65,6 +65,7 @@ CLASS_META = {
     "DISCONNECT_SUP": ("掉链(静默)", "#ef5350", True),
     "TX_QUEUE_FULL": ("传输层错误", "#9e9e9e", False),
     "HEALTH_DEGRADED": ("健康状态异常", "#ff7043", True),
+    "ATT_FREEZE": ("ATT 层冻结", "#8d6e63", True),
 }
 
 

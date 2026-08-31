@@ -27,13 +27,15 @@ class Classification(IntEnum):
     DISCONNECT_SUP = 4     # supervision timeout(静默掉链)
     TX_QUEUE_FULL = 5      # 传输层错误,用例无效
     HEALTH_DEGRADED = 6    # 用例"完成"但健康检查异常(迟滞显现)
+    ATT_FREEZE = 7         # ATT 层冻结:post-HC 读无响应但 LL 链路存活(无 TERMINATE/无 supervision)
 
 
 CLASSIFICATION_NAMES = {int(c): c.name for c in Classification}
 
 # 值得立即人工关注的分类
 ALERT_CLASSIFICATIONS = {Classification.TIMEOUT, Classification.DISCONNECT_TERM,
-                         Classification.DISCONNECT_SUP, Classification.HEALTH_DEGRADED}
+                         Classification.DISCONNECT_SUP, Classification.HEALTH_DEGRADED,
+                         Classification.ATT_FREEZE}
 
 
 def compute_signature(result: "CaseResult") -> str:

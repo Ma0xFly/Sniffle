@@ -166,7 +166,8 @@ def page():
             if cls != "全部" and r.get("classification") != cls:
                 continue
             if only_alerts.value and r.get("classification") not in (
-                    "TIMEOUT", "DISCONNECT_TERM", "DISCONNECT_SUP", "HEALTH_DEGRADED"):
+                    "TIMEOUT", "DISCONNECT_TERM", "DISCONNECT_SUP",
+                    "HEALTH_DEGRADED", "ATT_FREEZE"):
                 continue
             if layer and layer not in (r.get("layer") or "").lower():
                 continue

@@ -262,7 +262,8 @@ def main():
     assert stats.get("OK_RESPONSE", 0) > 20, stats
     assert stats.get("ERROR_RESPONSE", 0) > 30, stats
     # 干跑里假 server 行为正确,不应有超时/掉链
-    for bad in ("TIMEOUT", "DISCONNECT_TERM", "DISCONNECT_SUP", "HEALTH_DEGRADED"):
+    for bad in ("TIMEOUT", "DISCONNECT_TERM", "DISCONNECT_SUP", "HEALTH_DEGRADED",
+                "ATT_FREEZE"):
         assert bad not in stats, (bad, stats)
 
     # GATT 地图核对
@@ -349,6 +350,38 @@ def main():
     finally:
         central_fuzz.make_transport = orig
     central_fuzz.serial_guard = orig_guard    # 全部段结束,恢复真实串口锁
+
+    # ---- ATT_FREEZE / HEALTH_DEGRADED 分类判定 ----
+    from core.session import FuzzSession as _FS
+
+    class FreezeHw(FakeHw):
+        """frozen 后对 read(0x0A)不响应,链路保持(ATT 冻结模拟)。"""
+        frozen = False
+
+        def _on_att(self, att):
+            if att[0] == 0x0A and self.frozen:
+                return
+            super()._on_att(att)
+
+    fhw = FreezeHw()
+    ft = SniffleTransport(fhw, jsonl_path=None, conn_interval_units=12)
+    fs = _FS(ft, target)
+    fs.start()
+    fhw.frozen = True
+    r = fs.run_case("freeze", "classify", lambda: bytes([0x0A, 0x03, 0x00]))
+    assert r.classification.name == "ATT_FREEZE", r
+    assert "post_hc=timeout" in r.notes, r.notes
+    print("分类: 冻结读场景 -> ATT_FREEZE")
+
+    vt = SniffleTransport(FakeHw(), jsonl_path=None, conn_interval_units=12)
+    vs = _FS(vt, target)
+    vs.start()
+    vs.gatt.baseline["0x0003"]["value"] = "bb"    # 篡改基线 -> 读响应值不匹配
+    r = vs.run_case("degraded", "classify", lambda: bytes([0x0A, 0x03, 0x00]))
+    assert r.classification.name == "HEALTH_DEGRADED", r
+    assert "post_hc=value_changed" in r.notes, r.notes
+    print("分类: 值异常读场景 -> HEALTH_DEGRADED")
+
     print("FakeHw 干跑测试全部通过")
 
 

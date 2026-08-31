@@ -33,6 +33,7 @@ CLASS_BADGE = {
     "DISCONNECT_SUP": ("red-7", "DISC-SUP"),
     "TX_QUEUE_FULL": ("grey-6", "TXFULL"),
     "HEALTH_DEGRADED": ("deep-orange-6", "DEGRADED"),
+    "ATT_FREEZE": ("brown-6", "FROZEN"),
 }
 
 
@@ -135,7 +136,8 @@ def run_stats(run_dir) -> dict:
         "gatt_str": gatt_str,
         "alerts": sum(1 for r in recs
                       if r.get("classification") in
-                      ("TIMEOUT", "DISCONNECT_TERM", "DISCONNECT_SUP", "HEALTH_DEGRADED")),
+                      ("TIMEOUT", "DISCONNECT_TERM", "DISCONNECT_SUP",
+                       "HEALTH_DEGRADED", "ATT_FREEZE")),
         "ts_str": _fmt_ts(ts),
     }
 
@@ -195,7 +197,8 @@ def build_summary_md(run_dir, stats=None) -> str:
         lines.append("| %s | %d |" % (cls, n))
     alerts = [r for r in load_ledger(run_dir / "ledger.jsonl")
               if r.get("classification") in
-              ("TIMEOUT", "DISCONNECT_TERM", "DISCONNECT_SUP", "HEALTH_DEGRADED")]
+              ("TIMEOUT", "DISCONNECT_TERM", "DISCONNECT_SUP", "HEALTH_DEGRADED",
+               "ATT_FREEZE")]
     if alerts:
         lines += ["", "## 告警清单", "",
                   "| 用例 | 分类 | opcode | handle | terminate | 备注 |", "|---|---|---|---|---|---|"]

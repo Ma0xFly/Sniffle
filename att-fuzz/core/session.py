@@ -209,8 +209,12 @@ class FuzzSession:
         else:
             result.health_post = self.health_check()
             if result.health_post not in ("ok", "no_known_good"):
-                # "完成了"但目标已异常 -> 迟滞显现
-                result.classification = Classification.HEALTH_DEGRADED
+                # "完成了"但目标已异常 -> 迟滞显现。
+                # 区分:读无响应且链路存活 = ATT 层冻结;有响应但值/错码异常 = 健康受损
+                if result.health_post == "timeout":
+                    result.classification = Classification.ATT_FREEZE
+                else:
+                    result.classification = Classification.HEALTH_DEGRADED
                 result.notes.append("post_hc=%s" % result.health_post)
                 result.health_post = self._recover()
 
@@ -223,11 +227,11 @@ class FuzzSession:
 
     # ---------- 序列用例 ----------
 
-    # 用例级聚合优先级(最差者定分类):掉链 > 传输错误 > 健康异常 > 超时 > 错误响应 > 正常
+    # 用例级聚合优先级(最差者定分类):掉链 > 冻结 > 传输错误 > 健康异常 > 超时 > 错误响应 > 正常
     _SEQ_PRIORITY = (Classification.DISCONNECT_SUP, Classification.DISCONNECT_TERM,
-                     Classification.TX_QUEUE_FULL, Classification.HEALTH_DEGRADED,
-                     Classification.TIMEOUT, Classification.ERROR_RESPONSE,
-                     Classification.OK_RESPONSE)
+                     Classification.ATT_FREEZE, Classification.TX_QUEUE_FULL,
+                     Classification.HEALTH_DEGRADED, Classification.TIMEOUT,
+                     Classification.ERROR_RESPONSE, Classification.OK_RESPONSE)
 
     def run_sequence(self, case_id, layer, steps, replay_ctx=None, timeout=None):
         """执行序列用例。steps: [CaseStep](pdu 已按锚点构造)。
@@ -367,7 +371,10 @@ class FuzzSession:
         else:
             result.health_post = self.health_check()
             if result.health_post not in ("ok", "no_known_good"):
-                result.classification = Classification.HEALTH_DEGRADED
+                if result.health_post == "timeout":
+                    result.classification = Classification.ATT_FREEZE
+                else:
+                    result.classification = Classification.HEALTH_DEGRADED
                 result.notes.append("post_hc=%s" % result.health_post)
                 result.health_post = self._recover()
 

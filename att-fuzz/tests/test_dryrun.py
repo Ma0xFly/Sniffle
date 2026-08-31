@@ -482,6 +482,58 @@ def main():
     finally:
         central_fuzz.make_transport = orig
 
+    # ---- server_fuzz 反向角色:peripheral 广播 + 接受连接 + 应答循环(FakeHw)----
+    from roles import server_fuzz
+    from core.att_server import ServerResponder as _ServerResponder, build_db as _build_db
+
+    class PeriHw(FakeHw):
+        """记录 advertise 调用 + 注入一条 CONNECT_IND 模拟手机连入。"""
+        def __init__(self):
+            super().__init__()
+            self.advertised = []
+        def cmd_advertise(self, advData, scanRspData=b"", mode=0):
+            self.advertised.append((bytes(advData), bytes(scanRspData), mode))
+        def cmd_setaddr(self, addr, is_random=True):
+            self.setaddr = (bytes(addr), is_random)
+        # 其余 cmd_* 走 __getattr__ no-op
+
+    def _emit_connect_ind(hw, aa=0x55667788, interval=12, latency=0, timeout=2000):
+        # CONNECT_IND adv PDU: 2 字节 adv 头 + 36 字节 LLData(InitA/AdvA/AA/参数)
+        init_a = bytes.fromhex("112233445566")   # 手机(central)
+        adv_a = bytes.fromhex("ffeeddccbbaa")    # 我方(peripheral)
+        body = (bytes([0x05, 36]) + init_a + adv_a + pack("<I", aa) +
+                bytes([0xaa, 0xbb, 0xcc]) + bytes([4]) +
+                pack("<HHHH", 6, interval, latency, timeout) +
+                bytes([0xFF, 0xFF, 0xFF, 0xFF, 0x1F]) + bytes([0x06]))
+        hw._emit(DPacketMessage.from_body(body, is_data=False))
+
+    phw = PeriHw()
+    pt = SniffleTransport(phw, jsonl_path=None, conn_interval_units=12)
+    pt.role = "peripheral"
+    adv, srsp = server_fuzz.build_adv_data("Sniffle Server")
+    assert b"Sniffle Server" in adv and bytes([3, 0x03, 0x0F, 0x18]) in adv
+    pt.advertise(adv, srsp, interval_ms=200)
+    assert phw.advertised and phw.advertised[-1][0] == bytes(adv)
+    # 手机 CONNECT_IND -> accept_connection 返回参数,链路 up,连接参数对齐
+    _emit_connect_ind(phw)
+    conn = pt.accept_connection(timeout=5.0)
+    assert conn is not None and conn["interval"] == 12 and conn["aa"] == 0x55667788, conn
+    assert pt.link_up and pt.aa == 0x55667788
+    assert abs(pt.conn_interval_s - 12 * 0.00125) < 1e-9
+    # 应答循环:Exchange MTU -> 0x03;Read By Group Type -> 服务表
+    pr = _ServerResponder(_build_db(device_name="Sniffle Server"), server_mtu=247)
+    phw._emit_att(bytes([0x02, 0x40, 0x00]))
+    pdu = pt.recv_att(timeout=5.0)
+    assert pdu is not None and pdu.pdu[0] == 0x02
+    rsp = pr.handle_request(pdu.pdu)
+    assert rsp == bytes([0x03, 0xF7, 0x00]) and pr.att_mtu == 64
+    phw._emit_att(bytes([0x10, 0x01, 0x00, 0xFF, 0xFF, 0x00, 0x28]))
+    pdu = pt.recv_att(timeout=5.0)
+    assert pdu is not None and pdu.pdu[0] == 0x10
+    rsp = pr.handle_request(pdu.pdu)
+    assert rsp[0] == 0x11 and (len(rsp) - 2) % 6 == 0
+    print("server_fuzz 反向角色:广播/接受连接/应答循环 OK")
+
     print("FakeHw 干跑测试全部通过")
 
 

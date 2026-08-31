@@ -25,8 +25,8 @@ import serial
 from sniffle.constants import BLE_ADV_AA
 from sniffle.measurements import TerminateMeasurement
 from sniffle.pcap import PcapBleWriter
-from sniffle.packet_decoder import (AdvIndMessage, DataMessage, DPacketMessage,
-                                    LlControlMessage, ScanRspMessage)
+from sniffle.packet_decoder import (AdvIndMessage, ConnectIndMessage, DataMessage,
+                                    DPacketMessage, LlControlMessage, ScanRspMessage)
 from sniffle.sniffle_hw import (DebugMessage, MarkerMessage, PacketMessage,
                                SniffleHW, StateMessage)
 from sniffle.sniffer_state import SnifferState
@@ -147,6 +147,7 @@ class SniffleTransport:
         self._last_gate_at = 0
         self._terminate_reason: int | None = None
         self._event_listeners = []     # GUI 等外部订阅者(纯增量,不影响原行为)
+        self.role = "central"          # "central" | "peripheral"(server_fuzz 反转角色)
 
     def add_event_listener(self, fn):
         """订阅 _log_event 事件流。fn(rec: dict) 在传输层线程内同步调用,
@@ -184,11 +185,13 @@ class SniffleTransport:
                 log.warning("pcap write failed: %s", e)
 
     def _pcap_tx(self, ll_pdu: bytes, ts: float):
-        """C->P 方向的 LL PDU 记录(pdu_type=2,照 relay_master 约定)"""
+        """本机发出的 LL PDU 记录。方向按角色:central 是 C->P(pdu_type=2),
+        peripheral 是 P->C(=3)。"""
         if self.pcap:
             try:
+                pdu_type = 2 if self.role == "central" else 3
                 self.pcap.write_packet(int(ts * 1000000), self.aa or 0,
-                        0, 0, ll_pdu, 0, pdu_type=2)
+                        0, 0, ll_pdu, 0, pdu_type=pdu_type)
             except Exception as e:
                 log.warning("pcap write failed: %s", e)
 
@@ -423,6 +426,80 @@ class SniffleTransport:
         self._link_dropped = None
         return drop
 
+    # ---------- peripheral 角色(server_fuzz 反向角色用) ----------
+
+    def _connected_states(self):
+        """当前角色下"连接建立"的固件状态集合。"""
+        return (SnifferState.CENTRAL,) if self.role == "central" \
+            else (SnifferState.PERIPHERAL,)
+
+    def advertise(self, adv_data: bytes, scan_rsp_data: bytes = b"",
+                  interval_ms: int = 200, mac: bytes | None = None,
+                  is_random: bool = True):
+        """进入可连接 peripheral 广播态(ADVERTISING),等手机连入。
+        参照 relay_slave.py:63-89 的 advertise 序列;连接结束后固件回 STATIC
+        (pause_done(False)),需再次调用本方法重新广播。"""
+        self.hw.cmd_chan_aa_phy(37, BLE_ADV_AA, 0)
+        self.hw.cmd_pause_done(False)
+        self.hw.cmd_follow(True)           # 接受连接
+        self.hw.cmd_rssi()                 # 关 RSSI 过滤
+        self.hw.cmd_mac()                  # 关 MAC 过滤
+        self.hw.cmd_auxadv(False)
+        if mac:
+            self.hw.cmd_setaddr(mac, is_random)
+        else:
+            self.hw.random_addr()
+        self.hw.cmd_adv_interval(interval_ms)
+        self.hw.cmd_tx_power(5)
+        self.hw.cmd_interval_preload()
+        self.hw.mark_and_flush()
+        self._reset_link_state()
+        self._log_event("advertise", interval_ms=interval_ms)
+        self.hw.cmd_advertise(adv_data, scan_rsp_data)
+
+    def accept_connection(self, timeout: float | None = None) -> dict | None:
+        """peripheral 模式:等手机 CONNECT_IND 连入。返回连接参数 dict,超时返回 None。
+        固件收到 CONNECT_IND 后 stateTransition(PERIPHERAL)(StateMessage 送达),
+        且 CONNECT_IND 本身作为 PacketMessage 转发 -- 从这里取 aa/连接参数,
+        设 decoder_state.cur_aa 后开始跟随连接数据。"""
+        deadline = time.monotonic() + (timeout if timeout is not None else 30.0)
+        while time.monotonic() < deadline:
+            if not self._select_ready(deadline):
+                continue
+            try:
+                msg = self.hw.recv_and_decode()
+            except Exception as e:
+                log.debug("accept decode error: %s", e)
+                continue
+            if isinstance(msg, PacketMessage):
+                try:
+                    dpkt = DPacketMessage.decode(msg)
+                except Exception as e:
+                    log.debug("accept packet decode error: %s", e)
+                    continue
+                if isinstance(dpkt, ConnectIndMessage):
+                    aa = dpkt.aa_conn
+                    self.hw.decoder_state.cur_aa = aa
+                    self.aa = aa
+                    if dpkt.Interval:
+                        self.conn_interval_s = dpkt.Interval * 0.00125
+                        self.response_timeout = 2 * self.conn_interval_s + 2.0
+                    self._link_up = True
+                    self._log_event("accepted", aa="%08X" % aa,
+                                    interval=dpkt.Interval, latency=dpkt.Latency,
+                                    timeout=dpkt.Timeout,
+                                    init_addr=bytes(dpkt.InitA).hex(),
+                                    init_random=bool(dpkt.TxAdd))
+                    return {"aa": aa, "interval": dpkt.Interval,
+                            "latency": dpkt.Latency, "timeout": dpkt.Timeout,
+                            "init_addr": bytes(dpkt.InitA).hex(),
+                            "init_random": bool(dpkt.TxAdd)}
+                # 广播期其他包(外界的广告等):忽略
+            else:
+                # StateMessage/Debug/Marker 等交给标准处理(记录、维护链路状态)
+                self._process_message(msg)
+        return None
+
     # ---------- DLE / MTU ----------
 
     def setup_data_size(self, declare_mtu: int = 517, timeout: float | None = None) -> tuple:
@@ -591,7 +668,9 @@ class SniffleTransport:
             return None
         elif isinstance(msg, StateMessage):
             self._log_event("state", new=msg.new_state.name, old=msg.last_state.name)
-            if self._link_up and msg.new_state not in (SnifferState.CENTRAL,):
+            # 连接态判定按角色:central 以 CENTRAL 为连上;peripheral 以 PERIPHERAL 为连上。
+            # 其余状态转移(掉链/复位)一律视为 supervision 掉链。
+            if self._link_up and msg.new_state not in self._connected_states():
                 self._mark_link_drop(LinkDrop("supervision"))
             return None
         elif isinstance(msg, TerminateMeasurement):

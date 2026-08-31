@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # att-fuzz/runner.py
 """
-att-fuzz CLI(阶段一:central 模式)。
+att-fuzz CLI(阶段一:central 模式;阶段三:server 反向角色)。
 
 用法:
   python3 att-fuzz/runner.py --target att-fuzz/targets/headphone.json
@@ -9,6 +9,8 @@ att-fuzz CLI(阶段一:central 模式)。
   python3 att-fuzz/runner.py --target ... --replay <pdu_hex>      # 重放原始 PDU
   python3 att-fuzz/runner.py --target ... --replay-case <id> --ledger <ledger.jsonl>
   python3 att-fuzz/runner.py --target ... --discover-only         # 只做发现,存 GATT 地图
+  python3 att-fuzz/runner.py --target ... --server                # 反向角色打手机(阶段三)
+  python3 att-fuzz/runner.py --target ... --probe                 # 扫描诊断
 """
 
 import argparse
@@ -57,6 +59,14 @@ def main():
                     help="追加变异轮数(0=纯确定性语料;N>0 在第一轮后进入签名驱动变异)")
     ap.add_argument("--round-budget", type=int, default=100,
                     help="每轮变异预算用例数(默认 100,预算耗尽进下一轮)")
+    ap.add_argument("--server", action="store_true",
+                    help="反向角色:伪装 GATT server 打手机 client(阶段三,攻击面⑧)")
+    ap.add_argument("--server-name", default="Sniffle Server",
+                    help="server 广播/服务里的设备名")
+    ap.add_argument("--server-duration", type=float, default=0.0,
+                    help="server 运行秒数(0=一直跑到 Ctrl-C)")
+    ap.add_argument("--adb-serial", default="ZD9L8H454HDY7DEU",
+                    help="logcat oracle 的 Android 序列号")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -99,6 +109,12 @@ def main():
             args.replay_expect = bool(replay.get("expect_response", True))
 
     try:
+        if args.server:
+            from roles import server_fuzz
+            sys.exit(server_fuzz.run(target, outdir, serport=args.serport,
+                                     duration=args.server_duration,
+                                     name=args.server_name,
+                                     adb_serial=args.adb_serial))
         if args.discover_only:
             sys.exit(_discover_only(target, outdir, args.serport))
 

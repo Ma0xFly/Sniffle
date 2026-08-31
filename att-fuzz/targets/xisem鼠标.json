@@ -1,0 +1,20 @@
+{
+  "name": "xisem鼠标",
+  "mac": "D8:E7:79:32:81:90",
+  "search_string": "",
+  "mac_random": 0,
+  "conn_interval": 12,
+  "latency": 0,
+  "connect_timeout": 10,
+  "pairing": "none",
+  "_字段说明": {
+    "name": "档案名,也是保存的文件名(如 new-target.json)",
+    "mac": "目标蓝牙地址 AA:BB:CC:DD:EE:FF;与 search_string 至少填一个",
+    "search_string": "广播名片段(如 'vivo');目标地址会轮换(耳机常见)时优先用它",
+    "mac_random": "地址类型:1=随机(RPA/静态),0=public;不确定就先跑 --probe 实测校对",
+    "conn_interval": "连接间隔,单位 1.25ms;越小 fuzz 越快(建议 12~24)",
+    "latency": "外设延迟;0=每个连接事件必响应,崩溃判定最稳",
+    "connect_timeout": "连接超时秒数",
+    "pairing": "配对要求;阶段一只支持 none(免配对目标)"
+  }
+}

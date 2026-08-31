@@ -40,9 +40,14 @@ L2CAP_CID_SIGNALING = 0x0005
 L2CAP_HDR_LEN = 4
 
 LL_TERMINATE_IND = 0x02
-LL_UNKNOWN_RSP = 0x08
+LL_UNKNOWN_RSP = 0x07      # 规范:0x07=UNKNOWN_RSP,0x08=FEATURE_REQ(旧值 0x08 误标)
+LL_FEATURE_REQ = 0x08
+LL_FEATURE_RSP = 0x09
 LL_LENGTH_REQ = 0x14
 LL_LENGTH_RSP = 0x15
+
+# 我们作为 server/peripheral 向手机声明的 LL 特征:DLE(bit5)。无加密(无 SMP,设计边界)。
+LL_FEATURES_MASK = 0x20
 
 LL_MAX_PAYLOAD_DLE = 251
 LL_TIME_DLE = 2120          # 251 字节 @2M 的 us 数,协商值里用它
@@ -720,7 +725,16 @@ class SniffleTransport:
         if not payload:
             return
         opcode = payload[0]
-        if opcode == LL_LENGTH_REQ:
+        if opcode == LL_FEATURE_REQ:
+            # 手机发起特征交换:固件不实现 LL 特征,host 代答 FEATURE_RSP。
+            # 声明 DLE 支持(我们确实做 DLE)让 MTK 等严格栈正常走后续 ATT;
+            # 不声明加密(无 SMP,设计边界)。
+            self.hw.cmd_transmit(3, bytes([LL_FEATURE_RSP]) +
+                                 pack("<Q", LL_FEATURES_MASK))
+            self._log_event("ll_feature_req")
+        elif opcode == LL_FEATURE_RSP:
+            self._log_event("ll_feature_rsp")
+        elif opcode == LL_LENGTH_REQ:
             # 对端发起 DLE:回 RSP(我们的收发上限)
             peer_max_rx = unpack("<H", payload[1:3])[0] if len(payload) >= 3 else 27
             self.hw.cmd_transmit(3, bytes([LL_LENGTH_RSP]) +

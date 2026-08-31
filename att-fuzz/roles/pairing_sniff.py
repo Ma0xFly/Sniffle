@@ -127,9 +127,14 @@ def _run_locked(target, outdir, serport, duration, mac_override,
 
     def record(**fields):
         rec = {"ts": round(time.time(), 6), "conn": state["conn_no"]}
-        rec.update(fields)
+        for k, v in fields.items():
+            if isinstance(v, (bytes, bytearray)):
+                v = v.hex()
+            elif isinstance(v, (list, tuple)):
+                v = [x.hex() if isinstance(x, (bytes, bytearray)) else x for x in v]
+            rec[k] = v
         with open(ledger_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
     record(kind="sniff_start", mode=mode_desc, target=wire_mac.hex() if wire_mac else None,
            phone_mac=phone_wire.hex() if phone_wire else None, duration=duration)

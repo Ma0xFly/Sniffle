@@ -222,4 +222,19 @@ _multi = [_m3.mutate(_seed, round_no=i).steps for i in range(2, 62)]
 _same = [st for st in _multi if len(st) >= 2 and st[0].gate_at is not None
          and st[0].gate_at == st[1].gate_at]
 assert _same, "同事件多发算子未触发"
+
+# 种子构造:PDU 必须来自 replay 的请求(而非台账 steps 的响应)
+_seedrec = {
+    "case_id": "seq-x", "layer": "cccd", "signature": "TIMEOUT",
+    "opcode": 0x12, "handle": 0x37,
+    "replay": {"kind": "sequence",
+               "steps": [{"pdu": "1237000100", "expect_response": True, "observe": 0},
+                         {"pdu": "1237000000", "expect_response": True, "observe": 0,
+                          "gate_at": 2}]},
+    "steps": [{"step": 0, "response_pdu": "13"}, {"step": 1, "response_pdu": "13"}],
+}
+_seed_from = SeedCase.from_ledger(_seedrec)
+assert [s.pdu.hex() for s in _seed_from.steps] == ["1237000100", "1237000000"]
+assert _seed_from.steps[1].gate_at == 2
+assert _seed_from.steps[0].pdu[0] == 0x12    # 请求 opcode,而非响应 0x13
 print("变异引擎自测全部通过")

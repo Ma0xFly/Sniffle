@@ -146,22 +146,29 @@ class SeedCase:
 
     @classmethod
     def from_ledger(cls, rec: dict, step_pdus: list | None = None) -> "SeedCase":
-        """从台账记录构造种子。step_pdus: 若台账缺 replay steps 可补。"""
+        """从台账记录构造种子。种子 PDU 必须来自请求(replay.steps 含请求 pdu);
+        台账 steps 只记响应(response_pdu),不能拿来当请求。"""
+        rp = rec.get("replay") or {}
         steps = []
-        for s in (rec.get("steps") or []):
-            pdu = bytes.fromhex(s.get("pdu", s.get("response_pdu", "")))
-            if not pdu:
+        for s in (rp.get("steps") or []):
+            if not s.get("pdu"):
                 continue
-            steps.append(CaseStep(pdu=pdu,
+            steps.append(CaseStep(pdu=bytes.fromhex(s["pdu"]),
                                   expect_response=bool(s.get("expect_response", True)),
                                   observe=float(s.get("observe", 0) or 0),
-                                  op=s.get("op")))
+                                  gate_at=int(s["gate_at"])
+                                  if s.get("gate_at") is not None else None))
+        if not steps and rp.get("pdu"):
+            steps = [CaseStep(pdu=bytes.fromhex(rp["pdu"]),
+                              expect_response=bool(rp.get("expect_response", True)))]
         if not steps and step_pdus:
             steps = [CaseStep(pdu=p, expect_response=True) for p in step_pdus]
-        if not steps and rec.get("replay", {}).get("pdu"):
-            steps = [CaseStep(pdu=bytes.fromhex(rec["replay"]["pdu"]),
-                              expect_response=bool(
-                                  rec["replay"].get("expect_response", True)))]
+        if not steps:
+            # 兜底:从台账步骤的响应 PDU 反推(仅作近似,变异语义弱)
+            for s in (rec.get("steps") or []):
+                pdu = bytes.fromhex(s.get("response_pdu", ""))
+                if pdu:
+                    steps.append(CaseStep(pdu=pdu, expect_response=True))
         return cls(case_id=rec.get("case_id", "seed"),
                    layer=rec.get("layer", "?"),
                    steps=steps,

@@ -75,6 +75,10 @@ def run(target: dict, outdir: Path, serport=None, duration: float = 0.0,
 # "no data",pcap 与台账一起断粮):10 秒窗口内 decode error >= 阈值即复位重同步。
 DESYNC_WINDOW_S = 10.0
 DESYNC_THRESHOLD = 10
+# 探测连接超时:连上后 N 秒无 SMP 即判定为 probe(GATT 发现/数据交换,非配对),
+# 强制复位断开跟随释放单射频去抓配对连接。实测 probe 跑 291s(5 分钟!)占用
+# 整个射频,配对连接在期间发生但无法捕获。
+PROBE_TIMEOUT_S = 60
 
 
 def _run_locked(target, outdir, serport, duration, mac_override,
@@ -121,7 +125,7 @@ def _run_locked(target, outdir, serport, duration, mac_override,
     ex = SmpExchange()
     rx = _L2capReassembly()
     state = {"cipher": None, "encrypting": False, "skdm": None, "skds": None,
-             "iv": None, "conn_no": 0}
+             "iv": None, "conn_no": 0, "probe_deadline": None}
     started = time.time()
     conn_ts = [None]
 
@@ -186,6 +190,11 @@ def _run_locked(target, outdir, serport, duration, mac_override,
                     _desync_recover("recv: %s" % repr(e)[:40])
                 continue
             if msg is None:
+                # probe 超时:连上后无 SMP 超过 PROBE_TIMEOUT_S -> 强制复位释放射频
+                pd = state.get("probe_deadline")
+                if pd and time.time() > pd:
+                    _desync_recover("probe_timeout: %ds no SMP" % PROBE_TIMEOUT_S)
+                    state["probe_deadline"] = None
                 continue
             if isinstance(msg, PacketMessage):
                 # recv_and_decode 已用 hw.decoder_state 完成类型化解码(含扩展广播
@@ -242,6 +251,7 @@ def _on_connect(dpkt, ex, state, record, conn_ts, phone_wire=None):
     state["encrypting"] = False
     state["skdm"] = state["skds"] = state["iv"] = None
     conn_ts[0] = time.time()
+    state["probe_deadline"] = time.time() + PROBE_TIMEOUT_S
     is_phone = bool(phone_wire and ia == phone_wire)
     log.info("conn#%d CONNECT_IND: %s->%s aa=%08X%s", state["conn_no"],
              ia.hex(), ra.hex(), dpkt.aa_conn,
@@ -281,6 +291,7 @@ def _on_data(dpkt, ex, state, record, rx):
         return
     if cid == SMP_CID:
         rec = ex.feed(sdu)   # sdu 已含 SMP opcode 起始
+        state["probe_deadline"] = None   # 有 SMP = 配对连接,取消探测超时
         record(kind="smp", dir=direction, op=rec.get("opcode"),
                name=rec.get("name"), pdu=sdu.hex()[:80])
         _maybe_finalize_keys(ex, state, record)
@@ -341,6 +352,7 @@ def _maybe_finalize_keys(ex, state, record):
 
 
 def _on_disconnect(ex, state, record, conn_ts):
+    state["probe_deadline"] = None
     s = ex.summary()
     dur = round(time.time() - conn_ts[0], 3) if conn_ts[0] else None
     record(kind="conn_end", dur_s=dur, **s)

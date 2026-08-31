@@ -277,17 +277,22 @@ class SniffleTransport:
         raise last_err
 
     def _reopen_serial(self):
-        """XDS110 UART 复位/重置后常报"假就绪读不到数据",重开串口即可。"""
+        """XDS110 UART 复位/重置后常报"假就绪读不到数据",重开串口即可。
+        复位后 CDC 需重新枚举,open 可能失败:有限重试,仍失败抛 TransportError
+        (否则后续写会裸崩 PortNotOpenError)。"""
         try:
             self.hw.ser.close()
         except Exception:
             pass
         time.sleep(0.5)
-        try:
-            self.hw.ser.open()
-        except Exception as e:
-            log.warning("serial reopen failed: %s", e)
-        time.sleep(0.5)
+        for attempt in range(1, 4):
+            try:
+                self.hw.ser.open()
+                return
+            except Exception as e:
+                log.warning("serial reopen attempt %d failed: %s", attempt, e)
+                time.sleep(1.0)
+        raise TransportError("serial reopen failed after firmware reset", stuck=True)
 
     def _reset_firmware(self):
         """固件若卡死在 initiator 命令里,只能整机复位。"""

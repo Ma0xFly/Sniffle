@@ -24,6 +24,11 @@ APM_RULES {
 - 提交消息 `<域>: <小写描述>`（如 `att-fuzz: fix gui pcap`、`fw: report terminate reason`），域取 `att-fuzz`、`fw`、`python_cli`、`docs`、`chore`。
 - 不向 origin push（origin 是上游仓库）。
 
+## Generality
+
+- 本项目是**通用 BLE fuzzer**，不是单设备专用工具。所有设备特定信息（MAC/LTK/IRK/地址/连接参数）只能从运行时输入（CLI 参数、targets/*.json、bt_config 文件）获取，**不得硬编码在代码里**。core/roles/runner 里的任何一行设备特定常量都是 bug。
+- 冒充/加密/注入/变异等能力应能跨设备复用：换目标只换 target 档案 + 密钥文件，不改代码。
+
 ## Documentation
 
 - 状态类信息只写《进度.md》（更新约定见文件头）；设计变更先核对《设计.md》§二平台事实再动笔。

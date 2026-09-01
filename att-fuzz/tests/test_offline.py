@@ -923,6 +923,7 @@ _proc = _sp2.run([sys.executable, str(REPO / "att-fuzz" / "runner.py"), "--help"
 assert "--impersonate" in _proc.stdout, "runner --help 应含 --impersonate"
 assert "--imp-duration" in _proc.stdout, "runner --help 应含 --imp-duration"
 assert "--phone-mac" in _proc.stdout, "runner --help 应含 --phone-mac"
+assert "--wall-ledger" in _proc.stdout, "runner --help 应含 --wall-ledger(冒充墙台账)"
 print("--impersonate CLI 参数接线自测通过")
 
 # 12) 阶段四 4.3 跟进:双角色 GATT 响应器 + 0x05 handle 加载(通用,无写死常量)
@@ -994,3 +995,164 @@ _wh = _imp._load_0x05_handles(_ledg)
 assert _wh == [3, 10], _wh
 assert _imp._load_0x05_handles(Path(_tmp) / "nope.jsonl") == []
 print("0x05 handle 加载器自测通过")
+
+# 13) 阶段五:run_corpus_loop 通用语料循环 + ATT_FREEZE/LinkDrop 回调 + 变异轮
+from core.fuzz_loop import run_corpus_loop
+from core.monitor import CaseResult as _CR, Classification as _CL
+from core.corpus import expand as _expand
+from core.transport import LinkDrop as _LD2, TransportError as _TE2
+
+# 最小 FuzzSession 桩:按脚本返回 CaseResult(或抛异常),记录调用。
+class _FakeSession:
+    def __init__(self, ledger, results=None, raises=None, gatt=None, mtu=247):
+        self.ledger = ledger
+        self.gatt = gatt if gatt is not None else m
+        self.t = type("FT", (), {"att_mtu": mtu, "cur_event": 0})()
+        self.negotiate = True
+        self._results = list(results or [])
+        self._raises = list(raises or [])
+        self._idx = 0
+        self.calls = []
+        self.ensure_calls = 0
+    def ensure_negotiation(self, want):
+        self.negotiate = bool(want)
+        self.ensure_calls += 1
+    def _next(self, case_id, layer):
+        if self._idx < len(self._raises):
+            ex = self._raises[self._idx]
+            self._idx += 1
+            raise ex
+        if self._idx < len(self._results):
+            r = self._results[self._idx]; self._idx += 1
+        else:
+            r = _CR(case_id=case_id, layer=layer,
+                    classification=_CL.OK_RESPONSE)
+        # 模拟真实 FuzzSession:台账记录(含签名)
+        if r.signature is None:
+            r.signature = "%s" % r.classification.name
+        self.ledger.record(r)
+        return r
+    def run_case(self, case_id, layer, pdu_builder, replay_ctx=None,
+                 expect_response=True, timeout=None):
+        self.calls.append(("run_case", case_id))
+        return self._next(case_id, layer)
+    def run_sequence(self, case_id, layer, steps, replay_ctx=None, timeout=None):
+        self.calls.append(("run_sequence", case_id))
+        return self._next(case_id, layer)
+
+# tiny 策略:2 条读用例(单 PDU,无 each 展开)
+import yaml as _yaml13
+_tiny_raw = [{"id": "rc-read-3", "layer": "handle", "op": "read_req", "handle": 3},
+             {"id": "rc-read-5", "layer": "handle", "op": "read_req", "handle": 5}]
+_tiny_strat = Path(_tmp) / "tiny_rc.yaml"
+_tiny_strat.write_text(_yaml13.safe_dump(_tiny_raw, allow_unicode=True),
+                       encoding="utf-8")
+_tiny_paths = [_tiny_strat]
+_tiny_cases = _expand(_tiny_raw, m, mtu=247, seed=1)
+assert len(_tiny_cases) == 2, len(_tiny_cases)
+
+# 13a) 基本循环:2 用例 -> 台账 2 行,stats OK_RESPONSE=2,done=2
+_tmp13 = Path(tempfile.mkdtemp())
+_led13 = Ledger(_tmp13 / "loop.jsonl")
+_fs = _FakeSession(_led13)
+_stats = run_corpus_loop(_fs, _tiny_paths, _led13, m, _fs.t, seed=1, max_cases=0)
+assert _stats["done"] == 2, _stats
+assert _stats["alerts"] == 0, _stats
+assert _stats["stats"].get("OK_RESPONSE") == 2, _stats["stats"]
+assert len(_fs.calls) == 2
+# no_mtu_negotiate_meta=True(默认):每用例前调 ensure_negotiation
+assert _fs.ensure_calls == 2
+print("run_corpus_loop 基本循环自测通过")
+
+# 13b) ATT_FREEZE 回调:on_freeze 返回 True -> 续跑(不 break)
+_tmp13b = Path(tempfile.mkdtemp())
+_led13b = Ledger(_tmp13b / "loop.jsonl")
+_freeze_called = [0]
+def _on_freeze(s):
+    _freeze_called[0] += 1
+    return True   # 假装重连成功
+_results_b = [_CR(case_id="rc-read-3", layer="handle",
+                  classification=_CL.ATT_FREEZE),
+              _CR(case_id="rc-read-5", layer="handle",
+                  classification=_CL.OK_RESPONSE)]
+_fs_b = _FakeSession(_led13b, results=_results_b)
+_stb = run_corpus_loop(_fs_b, _tiny_paths, _led13b, m, _fs_b.t, seed=1,
+                       on_freeze=_on_freeze)
+assert _freeze_called[0] == 1, _freeze_called
+assert _stb["done"] == 2, _stb            # freeze 用例也计入 done,后续续跑
+assert _stb["alerts"] == 1, _stb          # ATT_FREEZE 算告警
+assert _stb["stats"].get("ATT_FREEZE") == 1, _stb["stats"]
+print("ATT_FREEZE 回调续跑自测通过")
+
+# 13c) ATT_FREEZE 无回调 -> break(只跑 1 用例)
+_tmp13c = Path(tempfile.mkdtemp())
+_led13c = Ledger(_tmp13c / "loop.jsonl")
+_results_c = [_CR(case_id="rc-read-3", layer="handle",
+                  classification=_CL.ATT_FREEZE),
+              _CR(case_id="rc-read-5", layer="handle",
+                  classification=_CL.OK_RESPONSE)]
+_fs_c = _FakeSession(_led13c, results=_results_c)
+_stc = run_corpus_loop(_fs_c, _tiny_paths, _led13c, m, _fs_c.t, seed=1)
+# on_freeze=None -> break after first freeze
+assert _stc["done"] == 1, _stc
+assert _stc["alerts"] == 1, _stc
+assert len(_fs_c.calls) == 1, _fs_c.calls
+print("ATT_FREEZE 无回调 break 自测通过")
+
+# 13d) LinkDrop 回调:run_case 抛 LinkDrop -> on_link_drop True -> 续跑
+_tmp13d = Path(tempfile.mkdtemp())
+_led13d = Ledger(_tmp13d / "loop.jsonl")
+_drop_called = [0]
+def _on_link_drop():
+    _drop_called[0] += 1
+    return True
+# raises 第一条 LinkDrop,第二条正常 OK(raises 只影响首条)
+_fs_d = _FakeSession(_led13d, raises=[_LD2("supervision")])
+_std = run_corpus_loop(_fs_d, _tiny_paths, _led13d, m, _fs_d.t, seed=1,
+                       on_link_drop=_on_link_drop)
+assert _drop_called[0] == 1, _drop_called
+assert _std["done"] == 1, _std            # 第二条 OK -> done=1(第一条掉链不计 done)
+assert _std["stats"].get("OK_RESPONSE") == 1, _std["stats"]
+print("LinkDrop 回调续跑自测通过")
+
+# 13e) LinkDrop 无回调 -> break
+_tmp13e = Path(tempfile.mkdtemp())
+_led13e = Ledger(_tmp13e / "loop.jsonl")
+_fs_e = _FakeSession(_led13e, raises=[_LD2("supervision")])
+_ste = run_corpus_loop(_fs_e, _tiny_paths, _led13e, m, _fs_e.t, seed=1)
+assert _ste["done"] == 0, _ste
+assert len(_fs_e.calls) == 1
+print("LinkDrop 无回调 break 自测通过")
+
+# 13f) 变异轮 rounds=1 但无种子(全 OK,签名已入库存)-> 干净停止不崩
+# 隔离签名库:预填 OK_RESPONSE( FakeSession 的 OK 签名),使 is_new=False,
+# 且 OK 非告警 -> collect_seeds 返空 -> 变异轮不产出。
+os.environ["ATT_FUZZ_SIGDB"] = str(_tmp13 / "sigdb-ok.json")
+os.environ["ATT_FUZZ_SIGSCAN"] = str(_tmp13 / "sigscan-empty")
+Path(os.environ["ATT_FUZZ_SIGSCAN"]).mkdir(parents=True, exist_ok=True)
+import json as _j13
+Path(os.environ["ATT_FUZZ_SIGDB"]).write_text(
+    _j13.dumps({"signatures": ["OK_RESPONSE"], "repeat": {},
+                "alert_opcode": {}, "alert_handle": {}, "alert_layer": {}}),
+    encoding="utf-8")
+_tmp13f = Path(tempfile.mkdtemp())
+_led13f = Ledger(_tmp13f / "loop.jsonl")
+_fs_f = _FakeSession(_led13f)
+_stf = run_corpus_loop(_fs_f, _tiny_paths, _led13f, m, _fs_f.t, seed=1,
+                       rounds=1, round_budget=5)
+# 首轮 2 用例全 OK,签名已入库 -> 无种子 -> 变异轮不产出
+assert _stf["done"] == 2, _stf
+del os.environ["ATT_FUZZ_SIGDB"]
+del os.environ["ATT_FUZZ_SIGSCAN"]
+print("变异轮无种子干净停止自测通过")
+
+# 13g) no_mtu_negotiate_meta=False:不调 ensure_negotiation(加密冒充语义)
+_tmp13g = Path(tempfile.mkdtemp())
+_led13g = Ledger(_tmp13g / "loop.jsonl")
+_fs_g = _FakeSession(_led13g)
+_stg = run_corpus_loop(_fs_g, _tiny_paths, _led13g, m, _fs_g.t, seed=1,
+                       no_mtu_negotiate_meta=False)
+assert _fs_g.ensure_calls == 0, _fs_g.ensure_calls
+assert _stg["done"] == 2
+print("no_mtu_negotiate_meta=False 不切协商态自测通过")
+print("run_corpus_loop 全部自测通过")

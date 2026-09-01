@@ -539,6 +539,136 @@ def main():
     assert rsp[0] == 0x11 and (len(rsp) - 2) % 6 == 0
     print("server_fuzz 反向角色:广播/接受连接/应答循环 OK")
 
+    # ---- 加密冒充语料循环:FakeHw 模拟耳机握手 + 加密 ATT,跑语料循环 ----
+    # 复用 01_crack 测试向量(LTK/SKD/IV),_EncGattHw 在 FakeHw 之上叠加
+    # LL ENC 握手 + 加密 ATT(收 M2S 解密/回 S2M 加密)。
+    from core import bt_crypto as _bc_enc
+    from roles import impersonation_fuzz as _imp_dr
+
+    _SK_DR = _bc_enc.session_key(
+            bytes.fromhex("59d4b35ece0df548c10efe17e9da1f4c"),
+            bytes.fromhex("9f6b013d7eb25f87"), bytes.fromhex("68f5add3ca185186"))
+    _IV_DR = bytes.fromhex("ea6ec7cc6199de66")
+    # enable_encryption 入参(wire/dump 序 = big-endian 反转)
+    _LTK_WIRE_DR = bytes.fromhex("59d4b35ece0df548c10efe17e9da1f4c")[::-1]
+    _SKDM_WIRE_DR = bytes.fromhex("9f6b013d7eb25f87")[::-1]
+    _SKDS_WIRE_DR = bytes.fromhex("68f5add3ca185186")[::-1]
+    _IVM_WIRE_DR = _IV_DR[:4]
+    _IVS_WIRE_DR = _IV_DR[4:]
+
+    class _EncGattHw(FakeHw):
+        """FakeHw + LL ENC 握手 + 加密 ATT(M2S 解密 / S2M 加密回)。"""
+        def __init__(self, ltk_wire):
+            super().__init__()
+            self._ltk_wire = ltk_wire
+            self._cipher = None
+            self._enc_started = False
+            self._enc_complete = False
+
+        def _emit_att(self, att_pdu):
+            if self._cipher is not None and self._enc_complete:
+                sdu = pack("<HH", len(att_pdu), 4) + att_pdu
+                ct, mic = self._cipher.encrypt_packet(0x02, sdu, _bc_enc.DIR_S2M)
+                body = bytes([0x02, len(ct) + 4]) + ct + mic
+                self._emit(DPacketMessage.from_body(body, is_data=True,
+                                                    peripheral_send=True))
+            else:
+                super()._emit_att(att_pdu)
+
+        def _emit_ll_ctrl(self, payload, encrypted=False):
+            if encrypted and self._cipher is not None:
+                ct, mic = self._cipher.encrypt_packet(0x03, payload,
+                                                      _bc_enc.DIR_S2M)
+                body = bytes([0x03, len(ct) + 4]) + ct + mic
+            else:
+                body = bytes([0x03, len(payload)]) + payload
+            self._emit(DPacketMessage.from_body(body, is_data=True,
+                                                peripheral_send=True))
+
+        def cmd_transmit(self, llid, pdu, event=0):
+            if llid == 3 and len(pdu) >= 23 and pdu[0] == 0x03 and \
+                    self._cipher is None:
+                # LL_ENC_REQ(明文):建 cipher,回 ENC_RSP + START_ENC_REQ
+                skdm = pdu[11:19]; ivm = pdu[19:23]
+                ltk_be = self._ltk_wire[::-1]
+                skds = bytes.fromhex("68f5add3ca185186")[::-1]
+                ivs = bytes.fromhex("6199de66")
+                sessk = _bc_enc.session_key(ltk_be, skdm[::-1], skds[::-1])
+                self._cipher = _bc_enc.LLCipherState(sessk, ivm + ivs,
+                                                     search_window=2048)
+                self._emit_ll_ctrl(bytes([0x04]) + skds + ivs, encrypted=False)
+                self._emit_ll_ctrl(bytes([0x05]), encrypted=False)
+                self._enc_started = True
+                return
+            if llid == 3 and self._enc_started and not self._enc_complete:
+                # master 加密 START_ENC_RSP(M2S)-> 回加密 START_ENC_RSP(S2M)
+                self._emit_ll_ctrl(bytes([0x06]), encrypted=True)
+                self._enc_started = False
+                self._enc_complete = True
+                return
+            if llid == 2 and self._cipher is not None and self._enc_complete:
+                # 加密 M2S ATT -> 解密后走 FakeHw._on_att(响应经 _emit_att 加密)
+                if len(pdu) < 4:
+                    return
+                ct, mic = pdu[:-4], pdu[-4:]
+                pt = self._cipher.decrypt_packet(0x02, ct, mic,
+                                                 _bc_enc.DIR_M2S, 0)
+                if pt is None or len(pt) < 4:
+                    return
+                sdu_len, _cid = unpack("<HH", pt[:4])
+                self._on_att(pt[4:4 + sdu_len])
+                return
+            # 明文段(DLE LENGTH_REQ / MTU):走 FakeHw 原逻辑
+            super().cmd_transmit(llid, pdu, event)
+
+        def cmd_transmit_at(self, llid, pdu, event):
+            self.cmd_transmit(llid, pdu, event)
+
+    _eghw = _EncGattHw(_LTK_WIRE_DR)
+    _et = SniffleTransport(_eghw, pcap=None, jsonl_path=None,
+                           conn_interval_units=12)
+    _tgt_dr = {"mac": "AABBCCDDEEFF", "mac_random": True,
+               "conn_interval": 12, "latency": 0}
+    _et.connect(_tgt_dr, our_addr=bytes.fromhex("1122334455C0"),
+                our_addr_random=False)
+    assert _et.link_up
+    _et.setup_data_size()
+    # 驱动 LL ENC 握手(用 record 桩)
+    _ev_dr = []
+    _imp_dr._drive_enc_handshake(_et, _LTK_WIRE_DR,
+                                 lambda **k: _ev_dr.append(k))
+    assert _et._enc_enabled and _et._enc_cipher is not None
+    # 加密链路 GATT 发现
+    from core.gatt_map import discover as _discover_dr
+    _gatt_dr = _discover_dr(_et)
+    assert _gatt_dr.services and _gatt_dr.characteristics, "加密发现应出服务/特征"
+    print("加密冒充:握手 + 加密 GATT 发现 OK (%d 服务, %d 特征)"
+          % (len(_gatt_dr.services), len(_gatt_dr.characteristics)))
+
+    # 语料循环:小策略(handle 层),max_cases=4,无墙台账
+    from core.session import FuzzSession as _FS_dr
+    from core.fuzz_loop import run_corpus_loop as _rcl_dr
+    from core.monitor import Ledger as _Led_dr
+    _od_dr = REPO / "att-fuzz" / "logs" / "dryrun-enc-corpus"
+    _od_dr.mkdir(parents=True, exist_ok=True)
+    for _f in _od_dr.glob("*"):
+        _f.unlink()
+    _fled = _Led_dr(_od_dr / "fuzz_ledger.jsonl")
+    _fsess = _FS_dr(_et, _tgt_dr, gatt_map_path=None, ledger=_fled,
+                    negotiate_mtu=False)
+    _fsess.gatt = _gatt_dr
+    _strat = [REPO / "att-fuzz" / "strategies" / "handles.yaml"]
+    _cstats = _rcl_dr(_fsess, _strat, _fled, _gatt_dr, _et, seed=1,
+                      max_cases=4, on_freeze=lambda s: False,
+                      on_link_drop=lambda: False,
+                      no_mtu_negotiate_meta=False)
+    assert _cstats["done"] >= 1, _cstats
+    _fstats = _fled.stats()
+    assert _fstats, "fuzz 台账不应为空: %s" % _fstats
+    assert _fstats.get("OK_RESPONSE", 0) > 0 or _fstats.get("ERROR_RESPONSE", 0) > 0, _fstats
+    print("加密冒充语料循环: %d 用例, stats=%s" %
+          (_cstats["done"], _fstats))
+
     print("FakeHw 干跑测试全部通过")
 
 

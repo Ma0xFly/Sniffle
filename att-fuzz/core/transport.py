@@ -31,6 +31,7 @@ from sniffle.sniffle_hw import (DebugMessage, MarkerMessage, PacketMessage,
                                SniffleHW, StateMessage)
 from sniffle.sniffer_state import SnifferState
 
+from . import bt_crypto
 from .att import exchange_mtu_req, parse_exchange_mtu_rsp
 
 log = logging.getLogger("att-fuzz.transport")
@@ -40,6 +41,10 @@ L2CAP_CID_SIGNALING = 0x0005
 L2CAP_HDR_LEN = 4
 
 LL_TERMINATE_IND = 0x02
+LL_ENC_REQ = 0x03
+LL_ENC_RSP = 0x04
+LL_START_ENC_REQ = 0x05
+LL_START_ENC_RSP = 0x06
 LL_UNKNOWN_RSP = 0x07      # 规范:0x07=UNKNOWN_RSP,0x08=FEATURE_REQ(旧值 0x08 误标)
 LL_FEATURE_REQ = 0x08
 LL_FEATURE_RSP = 0x09
@@ -162,6 +167,15 @@ class SniffleTransport:
         self._terminate_reason: int | None = None
         self._event_listeners = []     # GUI 等外部订阅者(纯增量,不影响原行为)
         self.role = "central"          # "central" | "peripheral"(server_fuzz 反转角色)
+        # ---- 加密层(LL_ENC 握手后启用)----
+        # _enc_enabled=True 后:TX 路径(inject/inject_raw/_handle_ll_control 代答)
+        # 自动 AES-CCM 加密,RX 路径(_feed_rx_data)自动解密(含 LL control)。
+        # 握手驱动(impersonation_fuzz)在握手期间通过 _enc_handshake_q 取回
+        # ENC_RSP/START_ENC_REQ/START_ENC_RSP PDU(否则 _handle_ll_control 只记录)。
+        self._enc_enabled = False
+        self._enc_cipher: bt_crypto.LLCipherState | None = None
+        self._enc_handshake_q: list = []   # [(opcode, payload_bytes), ...]
+        self._non_att_q: list = []         # [(cid, sdu_bytes), ...] 非 ATT L2CAP(SMP/CID-5 signaling 等)
 
     def add_event_listener(self, fn):
         """订阅 _log_event 事件流。fn(rec: dict) 在传输层线程内同步调用,
@@ -272,16 +286,19 @@ class SniffleTransport:
                     return mac, not msg.TxAdd
         raise TransportError("target not found by advertisement string: %r" % s)
 
-    def connect(self, target, retries: int = 5) -> int:
+    def connect(self, target, retries: int = 5,
+                our_addr: bytes | None = None,
+                our_addr_random: bool = False) -> int:
         """发起直连(central),带自愈重试。
         target: dict/TargetProfile,含 mac 或 search_string。
+        our_addr/our_addr_random:冒充场景指定本机地址(默认 None=随机地址)。
         已知坑: host 在 INITIATING 期间退出会让固件卡死在 forever initiator
         命令里(radio task 永久阻塞),后续命令全部失效 -> 超时后必须 cmd_reset。
         另外该命令对 extended-advertising/慢广播目标有间歇失败(-1),需重试。"""
         last_err = None
         for attempt in range(1, retries + 1):
             try:
-                return self._connect_once(target)
+                return self._connect_once(target, our_addr, our_addr_random)
             except (TransportError, serial.SerialException, OSError) as e:
                 last_err = e
                 log.warning("connect attempt %d/%d failed: %s", attempt, retries, e)
@@ -332,7 +349,8 @@ class SniffleTransport:
         implied_random = bool(msb & 0x02) or (msb & 0xC0) == 0xC0
         return wire, implied_random
 
-    def _connect_once(self, target) -> int:
+    def _connect_once(self, target, our_addr: bytes | None = None,
+                      our_addr_random: bool = False) -> int:
         mac = target.get("mac") if hasattr(target, "get") else target["mac"]
         if mac:
             mac, implied_random = self._parse_mac(mac)
@@ -362,7 +380,11 @@ class SniffleTransport:
         self.hw.cmd_mac(mac, False)
         self.hw.cmd_auxadv(True)
         self.hw.cmd_interval_preload()
-        self.hw.random_addr()
+        # 本机地址:冒充场景用指定地址(如手机 public),否则随机
+        if our_addr is not None:
+            self.hw.cmd_setaddr(our_addr, our_addr_random)
+        else:
+            self.hw.random_addr()
         self.hw.cmd_tx_power(5)
         self.hw.mark_and_flush()
 
@@ -424,12 +446,60 @@ class SniffleTransport:
         self.ll_max = 27
         self.att_mtu = 23
         self.tx_queue_full = False
+        # 加密层状态也复位(重连后需重新走 LL_ENC 握手)
+        self._enc_enabled = False
+        self._enc_cipher = None
+        self._enc_handshake_q = []
+        self._non_att_q = []
+
+    # ---------- 加密层(LL_ENC 握手后启用)----------
+
+    def enable_encryption(self, ltk_wire: bytes, skdm_wire: bytes,
+                          skds_wire: bytes, ivm_wire: bytes, ivs_wire: bytes):
+        """LL_ENC 握手材料齐全后启用 host 侧 AES-CCM。ltk_wire = bt_config dump
+        序(HCI 小端),内部反转成大端喂 session_key。SKD/IV 保持空口序(同
+        pcap_decrypt)。启用后 inject/inject_raw 自动加密 TX,recv 路径自动解密
+        RX(含 LL control)。
+        字节序定案见 pcap_decrypt 模块尾:bt_config LTK dump 序需整体反转才是
+        e() 可用大端序;SKD/IV 各 8/4 字节空口小端序,session_key 取大端
+        (skds_be||skdm_be),故反转 SKDm/SKDs 后传入。"""
+        ltk_be = bytes(ltk_wire)[::-1]
+        sessk = bt_crypto.session_key(ltk_be, bytes(skdm_wire)[::-1],
+                                     bytes(skds_wire)[::-1])
+        iv = (bytes(ivm_wire) + bytes(ivs_wire))[:8]
+        self._enc_cipher = bt_crypto.LLCipherState(sessk, iv, search_window=2048)
+        self._enc_enabled = True
+        self._enc_handshake_q = []
+        self._log_event("enc_enabled", session_key=sessk.hex(), iv=iv.hex())
+
+    def _tx_ll_pdu(self, llid: int, payload: bytes, event: int | None = None,
+                   gate_at: int | None = None):
+        """发送一个 LL PDU。加密启用时:plaintext -> ct+mic 再交固件;未启用
+        则原样透传(非加密路径行为不变)。event/gate_at 同 cmd_transmit(_at)。
+        AAD = llid & 0x03(CP=0/RFU=0,固件头字节 & 0xE3 后只剩 LLID 位)。
+        pcap 记录本机发出的 LL PDU(加密后 ct+mic,与空口一致)。"""
+        if self._enc_enabled and self._enc_cipher is not None:
+            ct, mic = self._enc_cipher.encrypt_packet(
+                    llid & 0x03, payload, bt_crypto.DIR_M2S)
+            tx_pdu = ct + mic
+        else:
+            tx_pdu = payload
+        if gate_at is None:
+            self.hw.cmd_transmit(llid, tx_pdu,
+                                 (event if event is not None else self.cur_event) & 0xFFFF)
+        else:
+            if gate_at < self._last_gate_at:
+                raise TransportError("gate_at must be monotonic: %d after %d" %
+                                     (gate_at, self._last_gate_at))
+            self.hw.cmd_transmit_at(llid, tx_pdu, gate_at)
+            self._last_gate_at = gate_at
+        self._pcap_tx(bytes([llid, len(tx_pdu)]) + tx_pdu, time.time())
 
     def disconnect(self, reason: int = 0x13):
         """主动断链(我们发 LL_TERMINATE_IND)。断链事件随后会被消费掉,不当作靶子信号。"""
         self._expected_disconnect = True
         self._log_event("disconnect_req", reason=reason)
-        self.hw.cmd_transmit(3, bytes([LL_TERMINATE_IND, reason]))
+        self._tx_ll_pdu(3, bytes([LL_TERMINATE_IND, reason]))
 
     @property
     def link_up(self) -> bool:
@@ -525,7 +595,7 @@ class SniffleTransport:
 
         # 1) DLE -- 若对端已先发 LENGTH_REQ 且我们已应答,ll_max 已就位
         if self.ll_max == 27:
-            self.hw.cmd_transmit(3, bytes([LL_LENGTH_REQ]) +
+            self._tx_ll_pdu(3, bytes([LL_LENGTH_REQ]) +
                     pack("<HHHH", LL_MAX_PAYLOAD_DLE, LL_MAX_PAYLOAD_DLE,
                          LL_TIME_DLE, LL_TIME_DLE))
             deadline = time.monotonic() + timeout
@@ -563,17 +633,11 @@ class SniffleTransport:
         ts = time.time()
         for i, chunk in enumerate(frags):
             llid = 2 if i == 0 else 1
-            if gate_at is None:
-                self.hw.cmd_transmit(llid, chunk, self.cur_event & 0xFFFF)
-            else:
-                if gate_at < self._last_gate_at:
-                    raise TransportError(
-                            "gate_at must be monotonic: %d after %d" %
-                            (gate_at, self._last_gate_at))
-                self.hw.cmd_transmit_at(llid, chunk, gate_at)
-                self._last_gate_at = gate_at
-            # pcap 每分片一条记录(LL 头:LLID + 长度)
-            self._pcap_tx(bytes([llid, len(chunk)]) + chunk, ts)
+            if gate_at is not None and gate_at < self._last_gate_at:
+                raise TransportError(
+                        "gate_at must be monotonic: %d after %d" %
+                        (gate_at, self._last_gate_at))
+            self._tx_ll_pdu(llid, chunk, event=self.cur_event, gate_at=gate_at)
         self._tx_pending += len(frags)
         self._tx_watermark_event = self.cur_event
         self._tx_last_time = time.monotonic()
@@ -589,17 +653,11 @@ class SniffleTransport:
         self._wait_tx_room(len(fragments))
         ts = time.time()
         for llid, payload in fragments:
-            if gate_at is None:
-                self.hw.cmd_transmit(llid, payload, self.cur_event & 0xFFFF)
-            else:
-                if gate_at < self._last_gate_at:
-                    raise TransportError(
-                            "gate_at must be monotonic: %d after %d" %
-                            (gate_at, self._last_gate_at))
-                self.hw.cmd_transmit_at(llid, payload, gate_at)
-                self._last_gate_at = gate_at
-            # pcap 每分片一条记录(LL 头:LLID + 长度)
-            self._pcap_tx(bytes([llid, len(payload)]) + payload, ts)
+            if gate_at is not None and gate_at < self._last_gate_at:
+                raise TransportError(
+                        "gate_at must be monotonic: %d after %d" %
+                        (gate_at, self._last_gate_at))
+            self._tx_ll_pdu(llid, payload, event=self.cur_event, gate_at=gate_at)
         self._tx_pending += len(fragments)
         self._tx_watermark_event = self.cur_event
         self._tx_last_time = time.monotonic()
@@ -640,6 +698,23 @@ class SniffleTransport:
             got = self._pump(deadline)
             if got is not None:
                 return got
+            if self._link_dropped:
+                drop = self._link_dropped
+                self._link_dropped = None
+                self._link_up = False
+                raise drop
+        return None
+
+    def recv_non_att(self, timeout: float = 0.5):
+        """取一条非 ATT L2CAP SDU(SMP CID 6 / LE signaling CID 5 等);超时 None。
+        冒充双角色时用来应答 peer 的 L2CAP signaling 请求。"""
+        if self._non_att_q:
+            return self._non_att_q.pop(0)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._pump(deadline)
+            if self._non_att_q:
+                return self._non_att_q.pop(0)
             if self._link_dropped:
                 drop = self._link_dropped
                 self._link_dropped = None
@@ -715,6 +790,20 @@ class SniffleTransport:
     def _feed_rx_data(self, dpkt: DataMessage) -> AttPacket | None:
         llid = dpkt.body[0] & 0x3
         payload = dpkt.body[2:2 + dpkt.data_length]
+        # 加密段:所有 LL data PDU(含 control)都带 4 字节 MIC,逐包解密。
+        # 解密失败(MIC 不通过)记事件并丢弃,不喂给重组/控制处理(防垃圾)。
+        if self._enc_enabled and self._enc_cipher is not None and len(payload) >= 4:
+            hdr = dpkt.body[0]
+            sn = (hdr >> 3) & 1
+            ct = payload[:-4]
+            mic = payload[-4:]
+            pt = self._enc_cipher.decrypt_packet(hdr, ct, mic,
+                                                 bt_crypto.DIR_S2M, sn)
+            if pt is None:
+                self._log_event("enc_mic_fail", llid=llid, sn=sn,
+                                len=len(payload))
+                return None
+            payload = pt
         if llid == 3:
             self._handle_ll_control(payload, dpkt)
             return None
@@ -725,6 +814,7 @@ class SniffleTransport:
             return None
         if cid != ATT_CID:
             self._log_event("non_att_sdu", cid=cid, len=len(sdu))
+            self._non_att_q.append((cid, sdu))
             return None
         self._log_event("rx_att", pdu=sdu.hex(), event=dpkt.event)
         return AttPacket(pdu=sdu, event=dpkt.event, ts=dpkt.ts_epoch,
@@ -734,20 +824,30 @@ class SniffleTransport:
         if not payload:
             return
         opcode = payload[0]
+        # ---- LL_ENC 握手 PDU:交给 impersonation 角色驱动,不自动代答 ----
+        # ENC_REQ(0x03)/ENC_RSP(0x04)/START_ENC_REQ(0x05)/START_ENC_RSP(0x06)
+        # 握手期间(未 _enc_enabled)ENC_RSP/START_ENC_REQ 入队列供角色取回;
+        # 加密后 START_ENC_RSP 也入队列(已解密后的明文 opcode)。
+        if opcode in (LL_ENC_REQ, LL_ENC_RSP, LL_START_ENC_REQ, LL_START_ENC_RSP):
+            self._enc_handshake_q.append((opcode, bytes(payload)))
+            self._log_event("ll_enc_handshake", opcode=opcode,
+                            payload=payload.hex())
+            return
         if opcode == LL_FEATURE_REQ:
             # 手机发起特征交换:固件不实现 LL 特征,host 代答 FEATURE_RSP。
             # 声明 DLE 支持(我们确实做 DLE)让 MTK 等严格栈正常走后续 ATT;
-            # 不声明加密(无 SMP,设计边界)。
-            self.hw.cmd_transmit(3, bytes([LL_FEATURE_RSP]) +
-                                 pack("<Q", LL_FEATURES_MASK))
+            # 不声明加密(无 SMP,设计边界)。加密启用时代答也走密文。
+            rsp = bytes([LL_FEATURE_RSP]) + pack("<Q", LL_FEATURES_MASK)
+            self._tx_ll_pdu(3, rsp)
             self._log_event("ll_feature_req")
         elif opcode == LL_FEATURE_RSP:
             self._log_event("ll_feature_rsp")
         elif opcode == LL_VERSION_IND:
             # 版本交换:固件不实现,host 代答。LL 控制过程在 central 侧串行,
             # 版本交换挂着 -> DLE/ATT 全不开始(实测 MTK 栈 40s GATT LMP 超时)。
-            self.hw.cmd_transmit(3, bytes([LL_VERSION_IND]) +
-                    pack("<BHH", LL_VERSION_NR, LL_COMPANY_ID, LL_SUBVERSION_NR))
+            rsp = bytes([LL_VERSION_IND]) + \
+                pack("<BHH", LL_VERSION_NR, LL_COMPANY_ID, LL_SUBVERSION_NR)
+            self._tx_ll_pdu(3, rsp)
             self._log_event("ll_version_ind",
                             peer=payload[1:].hex() if len(payload) > 1 else "")
         elif opcode == LL_CONN_PARAM_REQ:
@@ -755,14 +855,15 @@ class SniffleTransport:
             # 后续 UPDATE_IND 由固件 rconf 机制自行跟随。
             if len(payload) >= 12:
                 rsp = bytes([LL_CONN_PARAM_RSP]) + payload[1:12] + b"\x00" * 12
-                self.hw.cmd_transmit(3, rsp)
+                self._tx_ll_pdu(3, rsp)
             self._log_event("ll_conn_param_req")
         elif opcode == LL_LENGTH_REQ:
             # 对端发起 DLE:回 RSP(我们的收发上限)
             peer_max_rx = unpack("<H", payload[1:3])[0] if len(payload) >= 3 else 27
-            self.hw.cmd_transmit(3, bytes([LL_LENGTH_RSP]) +
-                    pack("<HHHH", LL_MAX_PAYLOAD_DLE, LL_MAX_PAYLOAD_DLE,
-                         LL_TIME_DLE, LL_TIME_DLE))
+            rsp = bytes([LL_LENGTH_RSP]) + \
+                pack("<HHHH", LL_MAX_PAYLOAD_DLE, LL_MAX_PAYLOAD_DLE,
+                     LL_TIME_DLE, LL_TIME_DLE)
+            self._tx_ll_pdu(3, rsp)
             self.ll_max = max(27, min(LL_MAX_PAYLOAD_DLE, peer_max_rx))
             self._log_event("dle_req_from_peer", peer_max_rx=peer_max_rx)
         elif opcode == LL_LENGTH_RSP:

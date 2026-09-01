@@ -444,3 +444,178 @@ print("smp 解析与配对方式判定自测全部通过")
 assert pairing_sniff._parse_mac("64:44:7B:EE:41:F4") == bytes.fromhex("f441ee7b4464")
 assert pairing_sniff._parse_mac("AA:BB:CC:DD:EE:11") == bytes.fromhex("11eeddccbbaa")
 print("pairing_sniff MAC 解析自测通过")
+
+# 10) 阶段四 4.1 密钥产品化:bt_keys 解析 + pcap 离线解密引擎
+import json as _json
+import tempfile as _tempfile
+
+from core import bt_keys as _btk
+from core import pcap_decrypt as _pcd
+
+# ---- bt_keys: bt_config.conf fixture(Redmi K50 实测 bond 值做 fixture)----
+# PENC = ltk(16)+rand(8)+ediv(2)+sec(1)+ks(1);PID = irk(16)+addr_type(1)+addr(6 线序);
+# LENC = ltk(16)+div(2)+ks(1)+sec(1)。节名用线序冒号 hex(实测 dump 序)。
+_PENC = "a89469ab06f390362c32a49ac1d392c1" + "00" * 8 + "0000" + "01" + "10"
+_PID = "a808f85631989a023ac4d9845f6fd7f3" + "00" + "f441ee7b4464"
+_LENC = "11223344556677889900aabbccddeeff" + "0000" + "10" + "01"
+_BTCONF = """
+[Adapter]
+Address = 00c30a026c24
+Mode = 2
+
+[RemoteName]
+00c30a026c24 = Redmi K50
+
+[f4:41:ee:7b:44:64]
+TimeCreated = 1758987654
+Name = vivo TWS 3e
+LE_KEY_PENC = %s
+LE_KEY_PID = %s
+LE_KEY_LENC = %s
+LE_KEY_LID = 00000000
+""" % (_PENC, _PID, _LENC)
+_tmp = _tempfile.mkdtemp()
+_conf = Path(_tmp) / "bt_config.conf"
+_conf.write_text(_BTCONF, encoding="utf-8")
+
+_bonds = _btk.parse_bt_config(_conf, target_mac="64:44:7B:EE:41:F4")
+assert len(_bonds) == 1, "目标节(线序节名 x 书写序目标)应双序匹配"
+_b = _bonds[0]
+assert _b.ltk == _h("a89469ab06f390362c32a49ac1d392c1")
+assert _b.rand == b"\x00" * 8 and _b.ediv == b"\x00\x00"
+assert _b.key_size == 16 and _b.sec_level == 1
+assert _b.irk == _h("a808f85631989a023ac4d9845f6fd7f3")
+assert _b.peer_addr == _h("f441ee7b4464") and _b.peer_addr_type == 0
+assert _b.name == "vivo TWS 3e"
+assert _b.lenc_ltk == _h("11223344556677889900aabbccddeeff")
+assert _b.misc.get("lenc_ks") == 16 and _b.misc.get("lenc_sec") == 1
+assert _b.ltk_candidates() == [(_b.ltk, "penc"), (_b.lenc_ltk, "lenc")]
+# 不给目标:解析全部含 LE 密钥的节(Adapter/RemoteName 无 LE 密钥被丢弃)
+assert len(_btk.parse_bt_config(_conf)) == 1
+# 显示序节名也应命中
+_BTCONF2 = _BTCONF.replace("[f4:41:ee:7b:44:64]", "[64:44:7b:ee:41:f4]")
+_conf2 = Path(_tmp) / "bt_config2.conf"
+_conf2.write_text(_BTCONF2, encoding="utf-8")
+assert len(_btk.parse_bt_config(_conf2, target_mac="64:44:7B:EE:41:F4")) == 1
+# 目标不在文件里 -> 空 + 不崩
+assert _btk.parse_bt_config(_conf, target_mac="AA:BB:CC:DD:EE:FF") == []
+
+# ---- bt_keys: 提取 JSON 形态(vivo_bond_keys.json)+ 自动分派 ----
+_KEYSJSON = {
+    "target": "vivo TWS 3e (64:44:7B:EE:41:F4)",
+    "ltk_hex": "a89469ab06f390362c32a49ac1d392c1",
+    "rand_hex": "0000000000000000", "ediv_hex": "0000",
+    "irk_remote_hex": "a808f85631989a023ac4d9845f6fd7f3",
+    "key_size": 16,
+}
+_kj = Path(_tmp) / "bond_keys.json"
+_kj.write_text(_json.dumps(_KEYSJSON), encoding="utf-8")
+_jbonds = _btk.load_keys(_kj)
+assert len(_jbonds) == 1 and _jbonds[0].ltk == _h("a89469ab06f390362c32a49ac1d392c1")
+assert _jbonds[0].irk == _h("a808f85631989a023ac4d9845f6fd7f3")
+assert _btk.load_keys(_conf)[0].ltk == _h("a89469ab06f390362c32a49ac1d392c1")  # 分派到 bt_config
+assert _btk.all_ltk_candidates(_jbonds) == [(_h("a89469ab06f390362c32a49ac1d392c1"),
+                                             "vivo TWS 3e (64:44:7B:EE:41:F4)|penc")]
+print("bt_keys 解析自测全部通过")
+
+# ---- pcap_decrypt: 合成加密 pcap 端到端(01_crack 验证过的密码学材料)----
+from sniffle.pcap import PcapBleWriter as _Pbw
+_rev8 = lambda x: bytes(x)[::-1]
+
+def _synth_pcap(path, skip_empty=False, key=None):
+    """合成一条 legacy 配对连接:明文 SMP + ENC 握手(SKD 空口小端序写入)
+    + 加密段(control 也加密,含空包)。key 缺省=STK(01_crack 材料),会话密钥
+    按引擎同款推导。"""
+    stk = key or _h("59d4b35ece0df548c10efe17e9da1f4c")
+    skdm = _h("9f6b013d7eb25f87"); _skds = _h("68f5add3ca185186")
+    _iv = _h("ea6ec7cc6199de66")
+    _sk = _bc.session_key(stk, skdm, _skds)
+
+    def _enc(cnt, dire, hdr, pt):
+        ct, mic = _bc.ccm_encrypt(_sk, _bc.ccm_nonce(cnt, dire, _iv),
+                                  bytes([hdr & 0xE3]), pt)
+        return bytes([hdr, len(ct) + 4]) + ct + mic
+
+    _w = _Pbw(str(path))
+    _ts = [1000]
+    def _wr(pdu_type, body):
+        _w.write_packet(_ts[0], 0x11223344, 5, -60, body, phy=0, pdu_type=pdu_type)
+        _ts[0] += 100
+    # 明文段:ENC_REQ(m2s,SKD 空口序=小端,写入前反转)/ENC_RSP/START_ENC_REQ/SMP
+    _wr(2, bytes([0x03, 23, 3]) + b"\x00" * 8 + b"\x00\x00" + _rev8(skdm) + _iv[:4])
+    _wr(3, bytes([0x03, 13, 4]) + _rev8(_skds) + _iv[4:])
+    _wr(3, bytes([0x03, 1, 5]))
+    _smp = _h("01001005000301")
+    _l2 = len(_smp).to_bytes(2, "little") + b"\x06\x00" + _smp
+    _wr(3, bytes([0x02, len(_l2)]) + _l2)
+    # 加密段:START_ENC_RSP(c0)/空包(c1,可跳过模拟丢包)/SMP LTK(c1 s2m)/ATT(c2)/TERMINATE(c3)
+    _wr(2, _enc(0, _bc.DIR_M2S, 0x03, b"\x06"))
+    if not skip_empty:
+        _wr(2, _enc(1, _bc.DIR_M2S, 0x01, b""))
+    _sdu = b"\x06" + _h("9cd42e6a891d8be6bba504f153c0627f")
+    _l2s = len(_sdu).to_bytes(2, "little") + b"\x06\x00" + _sdu
+    _wr(3, _enc(1, _bc.DIR_S2M, 0x02, _l2s))
+    _att = _h("021700")
+    _l2a = len(_att).to_bytes(2, "little") + b"\x04\x00" + _att
+    _wr(2, _enc(2, _bc.DIR_M2S, 0x02, _l2a))
+    _wr(2, _enc(3, _bc.DIR_M2S, 0x03, _h("0213")))
+    _w.close()
+    return stk   # 候选 key(=加密用 key)
+
+_pc1 = Path(_tmp) / "cap.pcap"
+_stk = _synth_pcap(_pc1)
+# 候选给反转序(模拟"存储序与空口相反"):引擎应以 reversed 裁定并解出全部 SDU
+_rpts = _pcd.decrypt_pcap(_pc1, [(_stk[::-1], "fixture")])
+assert len(_rpts) == 1
+_r = _rpts[0]
+assert _r.key_match["byte_order"] == "reversed" and _r.key_match["label"] == "fixture"
+assert _r.key_match["session_key"] == _h("51b22eae6102e4b60b4a84227bfe1d60").hex()
+assert _r.mic_ok == 5 and _r.mic_fail == 0
+assert _r.enc["iv"] == "ea6ec7cc6199de66"      # IVm||IVs 空口序原样
+_ops = [f.record() for f in _r.sdus]
+assert [o["op"] for o in _ops] == ["SMP_OP_0x01", "SMP_OP_0x06", "EXCHANGE_MTU_REQ"]
+assert _ops[0]["phase"] == "plaintext" and _ops[0]["dir"] == "s2m"
+assert _ops[1]["phase"] == "decrypted" and _ops[1]["pdu"].startswith("069cd42e6a")
+assert _ops[2]["phase"] == "decrypted" and _ops[2]["dir"] == "m2s"
+assert _r.terminate == {"reason": 0x13, "encrypted": True}
+# 丢包窗口回扫:跳过空包(计数器跳 1)仍应解出全部 SDU
+_pc2 = Path(_tmp) / "cap_gap.pcap"
+_stk2 = _synth_pcap(_pc2, skip_empty=True)
+_r2 = _pcd.decrypt_pcap(_pc2, [(_stk2, "fixture")])[0]
+assert _r2.key_match["byte_order"] == "as-stored"
+assert [f.record()["op"] for f in _r2.sdus] == ["SMP_OP_0x01", "SMP_OP_0x06", "EXCHANGE_MTU_REQ"]
+# 错误 key -> 无匹配(MIC 全挂),报告不崩
+_r3 = _pcd.decrypt_pcap(_pc1, [(b"\x00" * 16, "wrong")])[0]
+assert _r3.key_match is None and _r3.mic_ok == 0
+# write_outputs 落档
+_top = _pcd.write_outputs(_rpts, Path(_tmp) / "out", str(_pc1))
+assert _top["sdus"] == 3 and _top["connections"] == 1
+assert (Path(_tmp) / "out" / "decrypt_report.json").is_file()
+assert len((Path(_tmp) / "out" / "decrypted_sdu.jsonl").read_text().splitlines()) == 3
+print("pcap_decrypt 端到端自测全部通过")
+
+# ---- --decrypt CLI 子进程(用户真实入口,含参数接线) ----
+import subprocess as _sp
+_proc = _sp.run([sys.executable, str(REPO / "att-fuzz" / "runner.py"),
+                 "--decrypt", str(_pc1), "--ltk", _stk[::-1].hex(),
+                 "--outdir", str(Path(_tmp) / "cli_out")],
+                capture_output=True, text=True, cwd=str(REPO))
+assert _proc.returncode == 0, _proc.stdout + _proc.stderr
+assert "KEY MATCH: cli-ltk (reversed" in _proc.stdout
+assert "EXCHANGE_MTU_REQ x1" in _proc.stdout
+_proc2 = _sp.run([sys.executable, str(REPO / "att-fuzz" / "runner.py"),
+                  "--decrypt", str(_pc1), "--ltk", "00" * 16,
+                  "--outdir", str(Path(_tmp) / "cli_out2")],
+                 capture_output=True, text=True, cwd=str(REPO))
+assert _proc2.returncode == 2 and "无候选 key 匹配" in _proc2.stdout
+# --bt-keys bt_config + --keys-mac(密钥文件主路径):用 fixture LTK 加密的 pcap
+_pc3f = Path(_tmp) / "cap_bond.pcap"
+_synth_pcap(_pc3f, key=_h("a89469ab06f390362c32a49ac1d392c1"))
+_proc3 = _sp.run([sys.executable, str(REPO / "att-fuzz" / "runner.py"),
+                  "--decrypt", str(_pc3f), "--bt-keys", str(_conf),
+                  "--keys-mac", "64:44:7B:EE:41:F4",
+                  "--outdir", str(Path(_tmp) / "cli_out3")],
+                 capture_output=True, text=True, cwd=str(REPO))
+assert _proc3.returncode == 0, _proc3.stdout + _proc3.stderr
+assert "bond:" in _proc3.stdout and "KEY MATCH: f4:41:ee:7b:44:64|penc" in _proc3.stdout
+print("--decrypt CLI 自测通过")

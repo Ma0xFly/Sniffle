@@ -11,6 +11,7 @@ att-fuzz CLI(阶段一:central 模式;阶段三:server 反向角色)。
   python3 att-fuzz/runner.py --target ... --discover-only         # 只做发现,存 GATT 地图
   python3 att-fuzz/runner.py --target ... --server                # 反向角色打手机(阶段三)
   python3 att-fuzz/runner.py --target ... --probe                 # 扫描诊断
+  python3 att-fuzz/runner.py --decrypt <pcap> --bt-keys <file>    # 离线解密(阶段四)
 """
 
 import argparse
@@ -38,7 +39,8 @@ def load_target(path: str) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description="Sniffle ATT/GATT fuzzer (stage 1: central)")
-    ap.add_argument("--target", required=True, help="targets/*.json 路径")
+    ap.add_argument("--target", default=None, help="targets/*.json 路径"
+                    "(--decrypt 离线模式可省)")
     ap.add_argument("--strategy", default=None,
                     help="策略目录/文件(默认 att-fuzz/strategies/)")
     ap.add_argument("--serport", default=None, help="串口(默认自动探测 XDS110)")
@@ -75,6 +77,16 @@ def main():
                     help="嗅探目标外设 MAC(书写序 AA:BB:..;缺省=猎取模式:无 MAC 过滤+extadv)")
     ap.add_argument("--phone-mac", default=None, metavar="MAC",
                     help="用户手机 MAC(书写序):台账里标记手机发起的 CONNECT_IND(配对连接识别)")
+    ap.add_argument("--decrypt", default=None, metavar="PCAP",
+                    help="离线解密模式:加密 BLE pcap + 密钥 -> ATT/SMP 明文流"
+                    "(阶段四 4.1,不碰硬件)")
+    ap.add_argument("--bt-keys", default=None, metavar="FILE",
+                    help="密钥文件:Android bt_config.conf 或提取 JSON"
+                    "(logs/vivo_bond_keys.json 形态),与 --decrypt 配合")
+    ap.add_argument("--keys-mac", default=None, metavar="MAC",
+                    help="bt_config.conf 里目标设备 MAC(书写序;缺省解析全部节)")
+    ap.add_argument("--ltk", default=None, metavar="HEX",
+                    help="直接给 LTK(16 字节 hex),与 --decrypt 配合,省 --bt-keys")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -83,9 +95,17 @@ def main():
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S")
 
-    target = load_target(args.target)
     outdir = Path(args.outdir) if args.outdir else \
-            REPO / "att-fuzz" / "logs" / ("run-" + datetime.now().strftime("%Y%m%d-%H%M%S"))
+            REPO / "att-fuzz" / "logs" / (
+                ("decrypt-" if args.decrypt else "run-")
+                + datetime.now().strftime("%Y%m%d-%H%M%S"))
+
+    if args.decrypt:
+        sys.exit(_decrypt_cli(args, outdir))
+
+    if not args.target:
+        raise SystemExit("error: 需要 --target(targets/*.json)或 --decrypt <pcap> 离线模式")
+    target = load_target(args.target)
     strategy = [args.strategy] if args.strategy else [REPO / "att-fuzz" / "strategies"]
 
     try:
@@ -141,6 +161,68 @@ def main():
                                   round_budget=args.round_budget))
     except SerialBusy as e:
         raise SystemExit("error: %s" % e)
+
+
+def _decrypt_cli(args, outdir) -> int:
+    """离线解密:pcap + 密钥 -> ATT/SMP 明文流。返回码:0=有连接解密成功;
+    2=有加密连接但无候选 key 匹配;1=输入错误。"""
+    from core import bt_keys, pcap_decrypt
+    candidates = []
+    if args.ltk:
+        try:
+            k = bytes.fromhex(args.ltk)
+        except ValueError:
+            raise SystemExit("error: --ltk 不是合法 hex")
+        if len(k) != 16:
+            raise SystemExit("error: --ltk 需 16 字节(32 hex 字符)")
+        candidates.append((k, "cli-ltk"))
+    if args.bt_keys:
+        if not Path(args.bt_keys).is_file():
+            raise SystemExit("error: 密钥文件不存在: %s" % args.bt_keys)
+        bonds = bt_keys.load_keys(args.bt_keys, target_mac=args.keys_mac)
+        if not bonds:
+            raise SystemExit("error: 密钥文件里没有可用 bond"
+                             "(bt_config 目标节未匹配?试试 --keys-mac)")
+        for b in bonds:
+            print("bond: %s" % json.dumps(b.summary(), ensure_ascii=False))
+        candidates.extend(bt_keys.all_ltk_candidates(bonds))
+    if not candidates:
+        raise SystemExit("error: --decrypt 需要 --bt-keys <file> 或 --ltk <hex>")
+
+    print("decrypt: %s (%d 个 LTK 候 x 双字节序)" % (args.decrypt, len(candidates)))
+    reports = pcap_decrypt.decrypt_pcap(args.decrypt, candidates)
+    top = pcap_decrypt.write_outputs(reports, outdir, args.decrypt)
+
+    any_ok = False
+    for r in reports:
+        s = r.summary()
+        print("conn#%d aa=%s packets=%d" % (s["conn"], s["aa"], s["packets"]))
+        if s["connect"]:
+            c = s["connect"]
+            print("  CONNECT_IND: %s -> %s (iat=%d rat=%d interval=%d)"
+                  % (c["init"], c["adv"], c["iat"], c["rat"], c["interval"]))
+        if s["enc"]:
+            e = s["enc"]
+            print("  LL_ENC: rand=%s ediv=%s" % (e["rand"], e["ediv"]))
+            print("    skdm=%s skds=%s iv=%s" % (e["skdm"], e["skds"], e["iv"]))
+        if s["key_match"]:
+            km = s["key_match"]
+            print("  KEY MATCH: %s (%s 字节序) mic_ok=%d session_key=%s"
+                  % (km["label"], km["byte_order"], km["mic_ok"],
+                     km["session_key"]))
+            any_ok = True
+            print("  SDU 流 %d 条: %s" % (s["sdu_count"],
+                  " ".join("%s x%d" % (k, v) for k, v in sorted(s["ops"].items()))))
+        elif s["enc"]:
+            print("  加密段无候选 key 匹配(MIC 全挂)")
+        elif s["sdu_count"]:
+            print("  明文连接: SDU 流 %d 条" % s["sdu_count"])
+        if s["terminate"]:
+            print("  TERMINATE reason=0x%02X encrypted=%s"
+                  % (s["terminate"]["reason"], s["terminate"]["encrypted"]))
+    print("报告: %s" % (outdir / "decrypt_report.json"))
+    print("SDU 流: %s" % (outdir / "decrypted_sdu.jsonl"))
+    return 0 if any_ok else 2
 
 
 def _latest_ledger() -> Path:

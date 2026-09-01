@@ -77,6 +77,9 @@ def main():
                     help="嗅探目标外设 MAC(书写序 AA:BB:..;缺省=猎取模式:无 MAC 过滤+extadv)")
     ap.add_argument("--phone-mac", default=None, metavar="MAC",
                     help="用户手机 MAC(书写序):台账里标记手机发起的 CONNECT_IND(配对连接识别)")
+    ap.add_argument("--sniff-hold", action="store_true",
+                    help="嗅探跟满整条连接(禁用 60s 无 SMP 的探测超时复位;"
+                    "加密重连会话收割用)")
     ap.add_argument("--decrypt", default=None, metavar="PCAP",
                     help="离线解密模式:加密 BLE pcap + 密钥 -> ATT/SMP 明文流"
                     "(阶段四 4.1,不碰硬件)")
@@ -142,7 +145,8 @@ def main():
             sys.exit(pairing_sniff.run(target, outdir, serport=args.serport,
                                        duration=args.sniff_duration,
                                        mac=args.sniff_mac,
-                                       phone_mac=args.phone_mac))
+                                       phone_mac=args.phone_mac,
+                                       hold=args.sniff_hold))
         if args.server:
             from roles import server_fuzz
             sys.exit(server_fuzz.run(target, outdir, serport=args.serport,

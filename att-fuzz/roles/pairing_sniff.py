@@ -63,12 +63,14 @@ def _parse_mac(mac_str) -> bytes:
 
 
 def run(target: dict, outdir: Path, serport=None, duration: float = 0.0,
-        mac: str | None = None, phone_mac: str | None = None) -> int:
+        mac: str | None = None, phone_mac: str | None = None,
+        hold: bool = False) -> int:
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     serport = serport or target.get("serport")
     with serial_guard(serport, "CLI pairing_sniff(被动嗅探)"):
-        return _run_locked(target, outdir, serport, duration, mac, phone_mac)
+        return _run_locked(target, outdir, serport, duration, mac, phone_mac,
+                           hold)
 
 
 # 串口 desync 自愈参数(上轮实测:XDS110/UART 丢字节引发 decode error 连环 + pyserial
@@ -78,11 +80,12 @@ DESYNC_THRESHOLD = 10
 # 探测连接超时:连上后 N 秒无 SMP 即判定为 probe(GATT 发现/数据交换,非配对),
 # 强制复位断开跟随释放单射频去抓配对连接。实测 probe 跑 291s(5 分钟!)占用
 # 整个射频,配对连接在期间发生但无法捕获。
+# hold=True(加密重连会话收割)禁用:那条连接就是猎物,要跟满全程。
 PROBE_TIMEOUT_S = 60
 
 
 def _run_locked(target, outdir, serport, duration, mac_override,
-                phone_mac=None) -> int:
+                phone_mac=None, hold=False) -> int:
     hw = make_sniffle_hw(serport)
     from sniffle.sniffle_hw import SnifferMode
 
@@ -125,7 +128,7 @@ def _run_locked(target, outdir, serport, duration, mac_override,
     ex = SmpExchange()
     rx = _L2capReassembly()
     state = {"cipher": None, "encrypting": False, "skdm": None, "skds": None,
-             "iv": None, "conn_no": 0, "probe_deadline": None}
+             "iv": None, "conn_no": 0, "probe_deadline": None, "hold": hold}
     started = time.time()
     conn_ts = [None]
 
@@ -191,8 +194,9 @@ def _run_locked(target, outdir, serport, duration, mac_override,
                 continue
             if msg is None:
                 # probe 超时:连上后无 SMP 超过 PROBE_TIMEOUT_S -> 强制复位释放射频
+                # (hold=True 时禁用:加密重连收割要跟满整条连接)
                 pd = state.get("probe_deadline")
-                if pd and time.time() > pd:
+                if pd and time.time() > pd and not state["hold"]:
                     _desync_recover("probe_timeout: %ds no SMP" % PROBE_TIMEOUT_S)
                     state["probe_deadline"] = None
                 continue
@@ -251,7 +255,8 @@ def _on_connect(dpkt, ex, state, record, conn_ts, phone_wire=None):
     state["encrypting"] = False
     state["skdm"] = state["skds"] = state["iv"] = None
     conn_ts[0] = time.time()
-    state["probe_deadline"] = time.time() + PROBE_TIMEOUT_S
+    if not state.get("hold"):
+        state["probe_deadline"] = time.time() + PROBE_TIMEOUT_S
     is_phone = bool(phone_wire and ia == phone_wire)
     log.info("conn#%d CONNECT_IND: %s->%s aa=%08X%s", state["conn_no"],
              ia.hex(), ra.hex(), dpkt.aa_conn,

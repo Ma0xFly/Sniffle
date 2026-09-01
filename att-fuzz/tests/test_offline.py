@@ -10,7 +10,7 @@ sys.path.insert(0, str(REPO / "att-fuzz"))
 # 1) 全模块导入
 from core import (att, transport, gatt_map, monitor, session, corpus,  # noqa
                   att_server, adb_oracle, bt_crypto, smp)
-from roles import central_fuzz, server_fuzz, pairing_sniff  # noqa
+from roles import central_fuzz, server_fuzz, pairing_sniff, impersonation_fuzz  # noqa
 print("imports OK")
 
 # 2) 合成 GATT 地图 + 语料展开
@@ -619,3 +619,308 @@ _proc3 = _sp.run([sys.executable, str(REPO / "att-fuzz" / "runner.py"),
 assert _proc3.returncode == 0, _proc3.stdout + _proc3.stderr
 assert "bond:" in _proc3.stdout and "KEY MATCH: f4:41:ee:7b:44:64|penc" in _proc3.stdout
 print("--decrypt CLI 自测通过")
+
+# 11) 阶段五:加密冒充 -- bt_crypto.encrypt_packet + 传输层加密 + LL control 代答加密 + 握手
+import os as _os
+from collections import deque as _deque
+from struct import pack as _pack
+
+from sniffle.decoder_state import SniffleDecoderState as _SDS
+from sniffle.packet_decoder import DPacketMessage as _DPM
+from core.transport import SniffleTransport as _ST
+
+# ---- 测试向量(01_crack 材料,session_key=51b22eae...)----
+_SK = _h("51b22eae6102e4b60b4a84227bfe1d60")   # 会话密钥(big-endian)
+_IV = _h("ea6ec7cc6199de66")                    # IVm||IVs(空口序)
+# enable_encryption 入参(wire/dump 序 = big-endian 反转):
+_LTK_WIRE = _h("59d4b35ece0df548c10efe17e9da1f4c")[::-1]   # = STK 反转
+_SKDM_WIRE = _h("9f6b013d7eb25f87")[::-1]                   # SKDm 反转
+_SKDS_WIRE = _h("68f5add3ca185186")[::-1]                   # SKDs 反转
+_IVM_WIRE = _IV[:4]                                         # ea6ec7cc
+_IVS_WIRE = _IV[4:]                                         # 6199de66
+
+
+# ---- bt_crypto.encrypt_packet: round-trip + 计数器推进 ----
+_st = _bc.LLCipherState(_SK, _IV, search_window=32)
+_pt1 = b"\x06"                          # START_ENC_RSP (1 byte)
+_ct1, _mic1 = _st.encrypt_packet(0x03, _pt1, _bc.DIR_M2S)
+# 用独立 cipher 回解(同 key/iv,counter 从 0 开始;SN 在 BLE 中交替 0,1,0,1)
+_st2 = _bc.LLCipherState(_SK, _IV, search_window=32)
+# 首包 SN=0,last_sn=None -> is_retx=False,start=0 -> counter 0 匹配
+_dec1 = _st2.decrypt_packet(0x03, _ct1, _mic1, _bc.DIR_M2S, 0)
+assert _dec1 == _pt1, "encrypt->decrypt round-trip 失败"
+assert _st2.counter[_bc.DIR_M2S] == 1   # 成功解密后计数器推进到 1
+
+# 两个 encrypt 产生不同密文(计数器推进)
+_pt2 = b"\x02\x13"                      # 2 bytes
+_ct2, _mic2 = _st.encrypt_packet(0x03, _pt2, _bc.DIR_M2S)
+assert _ct1 != _ct2 or _mic1 != _mic2, "两次 encrypt 应产生不同密文"
+# 第二包 SN=1(与首包 0 不同)-> is_retx=False,start=counter=1 -> counter 1 匹配
+_dec2 = _st2.decrypt_packet(0x03, _ct2, _mic2, _bc.DIR_M2S, 1)
+assert _dec2 == _pt2, "encrypt counter 1 -> decrypt 失败"
+assert _st2.counter[_bc.DIR_M2S] == 2
+print("bt_crypto.encrypt_packet round-trip + 计数器推进自测通过")
+
+
+# ---- 最小 FakeHw(记录 cmd_transmit,不自动响应)----
+class _EncFakeHw:
+    """记录 cmd_transmit;recv_and_decode 从队列返回(供 _pump 拉取)。
+    其他 cmd_* 均 no-op。不自动响应 ATT(测试手动喂 RX)。"""
+    def __init__(self):
+        self.decoder_state = _SDS()
+        self._q = _deque()
+        self.sent = []
+        r, w = _os.pipe()
+        _os.set_blocking(r, False)
+        _os.set_blocking(w, False)
+        self.ser = type("FS", (), {"fd": r})()
+        self._pw = w
+
+    def _emit(self, msg):
+        self._q.append(msg)
+        try:
+            _os.write(self._pw, b"x")
+        except BlockingIOError:
+            pass
+
+    def recv_and_decode(self, desync=False):
+        if not self._q:
+            return None
+        msg = self._q.popleft()
+        if not self._q:
+            try:
+                _os.read(self.ser.fd, 64)
+            except BlockingIOError:
+                pass
+        return msg
+
+    def cmd_transmit(self, llid, pdu, event=0):
+        self.sent.append((llid, bytes(pdu)))
+
+    def cmd_transmit_at(self, llid, pdu, event):
+        self.sent.append((llid, bytes(pdu)))
+
+    def __getattr__(self, name):
+        if name.startswith("cmd_"):
+            return lambda *a, **k: None
+        raise AttributeError(name)
+
+
+def _make_enc_transport():
+    """构造一个已启用加密的 transport(用 01_crack 测试向量)。"""
+    hw = _EncFakeHw()
+    t = _ST(hw, jsonl_path=None, conn_interval_units=12)
+    t._link_up = True
+    t.aa = 0x11223344
+    t.enable_encryption(_LTK_WIRE, _SKDM_WIRE, _SKDS_WIRE, _IVM_WIRE, _IVS_WIRE)
+    assert t._enc_enabled and t._enc_cipher is not None
+    return t, hw
+
+
+# ---- 传输层:inject 加密 TX ----
+_t1, _hw1 = _make_enc_transport()
+_att_pdu = bytes([0x0A, 0x03, 0x00])   # Read Request handle 3
+_t1.inject(_att_pdu)
+assert len(_hw1.sent) >= 1, "FakeHw 应收到 cmd_transmit"
+_llid1, _tx1 = _hw1.sent[-1]
+# 明文 SDU = L2CAP 头(4) + ATT(3) = 7 字节;加密后 = 7 ct + 4 mic = 11
+assert _llid1 == 2, "首分片 LLID 应为 2"
+assert len(_tx1) == 11, "加密后长度应为 11(7 ct + 4 mic), got %d" % len(_tx1)
+_plain_sdu = _pack("<HH", len(_att_pdu), 4) + _att_pdu
+assert _tx1[:7] != _plain_sdu, "TX 不应是明文"
+# 用独立 cipher 回解验证
+_c1 = _bc.LLCipherState(_SK, _IV, search_window=32)
+_d1 = _c1.decrypt_packet(0x02, _tx1[:7], _tx1[7:], _bc.DIR_M2S, 0)
+assert _d1 == _plain_sdu, "inject 加密 TX 回解失败"
+print("传输层 inject 加密 TX 自测通过")
+
+# ---- 传输层:加密 RX 解密 ----
+_t2, _hw2 = _make_enc_transport()
+_rsp_pdu = bytes([0x0B]) + b"hello"   # Read Response, 6 bytes
+_rsp_sdu = _pack("<HH", len(_rsp_pdu), 4) + _rsp_pdu  # 10 bytes
+_c2 = _bc.LLCipherState(_SK, _IV, search_window=32)
+_ct_rx, _mic_rx = _c2.encrypt_packet(0x02, _rsp_sdu, _bc.DIR_S2M)
+_body = bytes([0x02, len(_ct_rx) + 4]) + _ct_rx + _mic_rx
+_dpkt = _DPM.from_body(_body, is_data=True, peripheral_send=True)
+_result = _t2._process_message(_dpkt)
+assert _result is not None, "加密 RX 应解出 AttPacket"
+assert _result.pdu == _rsp_pdu, "解密后 ATT PDU 不匹配: %s" % _result.pdu.hex()
+print("传输层加密 RX 解密自测通过")
+
+# ---- 传输层:LL control 代答加密(FEATURE_REQ -> FEATURE_RSP)----
+_t3, _hw3 = _make_enc_transport()
+# 构造加密的 LL_FEATURE_REQ(明文 = bytes([0x08]), 1 byte)
+_c3 = _bc.LLCipherState(_SK, _IV, search_window=32)
+_ct_f, _mic_f = _c3.encrypt_packet(0x03, bytes([0x08]), _bc.DIR_S2M)
+_body_f = bytes([0x03, len(_ct_f) + 4]) + _ct_f + _mic_f
+_dpkt_f = _DPM.from_body(_body_f, is_data=True, peripheral_send=True)
+_t3._process_message(_dpkt_f)
+# transport 应已发 FEATURE_RSP(加密)
+assert len(_hw3.sent) >= 1, "transport 应代答 FEATURE_RSP"
+_llid_f, _tx_f = _hw3.sent[-1]
+assert _llid_f == 3, "FEATURE_RSP 应走 llid=3"
+# 明文 FEATURE_RSP = bytes([0x09]) + pack("<Q", 0x20) = 9 bytes
+# 加密后 = 9 ct + 4 mic = 13 bytes
+assert len(_tx_f) == 13, "加密 FEATURE_RSP 应 13 字节, got %d" % len(_tx_f)
+_plain_frsp = bytes([0x09]) + _pack("<Q", 0x20)
+assert _tx_f[:9] != _plain_frsp, "代答应加密,不是明文"
+# 回解验证
+_c3b = _bc.LLCipherState(_SK, _IV, search_window=32)
+_d_f = _c3b.decrypt_packet(0x03, _tx_f[:9], _tx_f[9:], _bc.DIR_M2S, 0)
+assert _d_f == _plain_frsp, "加密 FEATURE_RSP 回解失败"
+print("传输层 LL control 代答加密自测通过")
+
+# ---- 传输层:MIC 失败丢弃 ----
+_t4, _hw4 = _make_enc_transport()
+_bad_body = bytes([0x02, 6]) + b"\x00" * 2 + b"\xDE\xAD\xBE\xEF"  # 2 ct + 4 mic(假)
+_dpkt_bad = _DPM.from_body(_bad_body, is_data=True, peripheral_send=True)
+_result_bad = _t4._process_message(_dpkt_bad)
+assert _result_bad is None, "MIC 失败应返回 None(不喂垃圾给重组)"
+print("传输层 MIC 失败丢弃自测通过")
+
+# ---- 传输层:未加密路径回归(inject 原样透传)----
+_t5, _hw5 = _make_enc_transport()
+_t5._enc_enabled = False   # 关掉加密,模拟普通 central
+_t5.inject(_att_pdu)
+_llid5, _tx5 = _hw5.sent[-1]
+assert _tx5 == _plain_sdu, "未加密路径应原样透传(回归)"
+print("传输层未加密路径回归自测通过")
+
+# ---- 冒充握手:FakeHw 模拟耳机,drive_enc_handshake 端到端 ----
+class _ImpFakeHw:
+    """模拟耳机侧:收到 ENC_REQ 后回 ENC_RSP + START_ENC_REQ(明文);
+    收到加密的 START_ENC_RSP 后回加密的 START_ENC_RSP(S2M c0)。
+    记录所有 cmd_transmit 供断言。"""
+    def __init__(self, ltk_wire):
+        self.decoder_state = _SDS()
+        self._q = _deque()
+        self.sent = []
+        self._ltk_wire = ltk_wire
+        self._cipher = None
+        self._enc_started = False
+        r, w = _os.pipe()
+        _os.set_blocking(r, False)
+        _os.set_blocking(w, False)
+        self.ser = type("FS", (), {"fd": r})()
+        self._pw = w
+
+    def _emit(self, msg):
+        self._q.append(msg)
+        try:
+            _os.write(self._pw, b"x")
+        except BlockingIOError:
+            pass
+
+    def _emit_ll_ctrl(self, payload, encrypted=False):
+        """发一个 llid=3 的 DataMessage。encrypted=True 时用 S2M 方向加密。"""
+        if encrypted and self._cipher is not None:
+            ct, mic = self._cipher.encrypt_packet(0x03, payload,
+                                                  _bc.DIR_S2M)
+            body = bytes([0x03, len(ct) + 4]) + ct + mic
+        else:
+            body = bytes([0x03, len(payload)]) + payload
+        self._emit(_DPM.from_body(body, is_data=True, peripheral_send=True))
+
+    def recv_and_decode(self, desync=False):
+        if not self._q:
+            return None
+        msg = self._q.popleft()
+        if not self._q:
+            try:
+                _os.read(self.ser.fd, 64)
+            except BlockingIOError:
+                pass
+        return msg
+
+    def cmd_transmit(self, llid, pdu, event=0):
+        self.sent.append((llid, bytes(pdu)))
+        if llid == 3 and len(pdu) >= 23 and pdu[0] == 0x03:
+            # LL_ENC_REQ(明文):解析 SKDm/IVm,建 cipher,回 ENC_RSP + START_ENC_REQ
+            skdm = pdu[11:19]
+            ivm = pdu[19:23]
+            ltk_be = self._ltk_wire[::-1]
+            skds = _h("68f5add3ca185186")[::-1]   # 固定 SKDs(wire 序)
+            ivs = _h("6199de66")                    # 固定 IVs(wire 序)
+            sessk = _bc.session_key(ltk_be, skdm[::-1], skds[::-1])
+            iv = ivm + ivs
+            self._cipher = _bc.LLCipherState(sessk, iv, search_window=2048)
+            # ENC_RSP = opcode(1) + SKDs(8) + IVs(4)
+            enc_rsp = bytes([0x04]) + skds + ivs
+            self._emit_ll_ctrl(enc_rsp, encrypted=False)
+            # START_ENC_REQ(明文)
+            self._emit_ll_ctrl(bytes([0x05]), encrypted=False)
+            self._enc_started = True
+        elif llid == 3 and self._enc_started:
+            # 收到加密的 START_ENC_RSP(role 发的,c0 M2S)
+            # 回加密的 START_ENC_RSP(S2M c0)
+            self._emit_ll_ctrl(bytes([0x06]), encrypted=True)
+            self._enc_started = False
+
+    def cmd_transmit_at(self, llid, pdu, event):
+        self.cmd_transmit(llid, pdu, event)
+
+    def __getattr__(self, name):
+        if name.startswith("cmd_"):
+            return lambda *a, **k: None
+        raise AttributeError(name)
+
+
+_imp_hw = _ImpFakeHw(_LTK_WIRE)
+_imp_t = _ST(_imp_hw, jsonl_path=None, conn_interval_units=12)
+_imp_t._link_up = True
+_imp_t.aa = 0x11223344
+
+_events = []
+def _rec(**f):
+    _events.append(f)
+
+# 驱动握手
+impersonation_fuzz._drive_enc_handshake(_imp_t, _LTK_WIRE, _rec)
+
+# 断言:加密已启用
+assert _imp_t._enc_enabled, "握手后应 _enc_enabled=True"
+assert _imp_t._enc_cipher is not None, "握手后应有 cipher"
+
+# 断言:FakeHw 收到了 ENC_REQ(明文,23 字节)和 START_ENC_RSP(加密,5 字节)
+_enc_reqs = [(l, p) for l, p in _imp_hw.sent if l == 3 and len(p) >= 23 and p[0] == 0x03]
+assert len(_enc_reqs) == 1, "应发 1 个 ENC_REQ, got %d" % len(_enc_reqs)
+_start_enc_rsps = [(l, p) for l, p in _imp_hw.sent if l == 3 and len(p) == 5]
+assert len(_start_enc_rsps) == 1, "应发 1 个加密 START_ENC_RSP(5 字节), got %d" % len(_start_enc_rsps)
+_, _ser_tx = _start_enc_rsps[0]
+assert _ser_tx != bytes([0x06]), "START_ENC_RSP 应加密(不是明文 0x06)"
+# 回解验证(用 FakeHw 的 cipher -- M2S c0)
+_d_start = _imp_hw._cipher.decrypt_packet(0x03, _ser_tx[:1],
+                                           _ser_tx[1:], _bc.DIR_M2S, 0)
+assert _d_start == bytes([0x06]), "加密 START_ENC_RSP 回解应为 0x06"
+
+# 断言:握手事件记录正确
+_kinds = [e.get("kind") for e in _events if isinstance(e, dict)]
+assert "enc_req_sent" in _kinds
+assert "enc_rsp_recv" in _kinds
+assert "start_enc_rsp_sent" in _kinds
+assert "start_enc_rsp_recv" in _kinds
+print("冒充握手端到端自测通过")
+
+# ---- 冒充握手:超时失败(从机不回 ENC_RSP)----
+class _SilentHw(_EncFakeHw):
+    """不响应任何 control PDU。"""
+    pass
+
+_silent_t = _ST(_SilentHw(), jsonl_path=None, conn_interval_units=12)
+_silent_t._link_up = True
+_silent_t.aa = 0x11223344
+try:
+    impersonation_fuzz._drive_enc_handshake(_silent_t, _LTK_WIRE, lambda **k: None)
+    raise AssertionError("从机不回 ENC_RSP 应抛 ImpersonationError")
+except impersonation_fuzz.ImpersonationError as _e:
+    assert "ENC_RSP" in str(_e), "错误消息应提到 ENC_RSP"
+print("冒充握手超时失败自测通过")
+
+# ---- --impersonate CLI 参数接线(子进程 --help 确认参数存在)----
+import subprocess as _sp2
+_proc = _sp2.run([sys.executable, str(REPO / "att-fuzz" / "runner.py"), "--help"],
+                capture_output=True, text=True, cwd=str(REPO))
+assert "--impersonate" in _proc.stdout, "runner --help 应含 --impersonate"
+assert "--imp-duration" in _proc.stdout, "runner --help 应含 --imp-duration"
+assert "--phone-mac" in _proc.stdout, "runner --help 应含 --phone-mac"
+print("--impersonate CLI 参数接线自测通过")

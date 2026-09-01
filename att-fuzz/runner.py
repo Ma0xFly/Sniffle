@@ -80,6 +80,11 @@ def main():
     ap.add_argument("--sniff-hold", action="store_true",
                     help="嗅探跟满整条连接(禁用 60s 无 SMP 的探测超时复位;"
                     "加密重连会话收割用)")
+    ap.add_argument("--impersonate", action="store_true",
+                    help="加密冒充:用 bond 密钥伪装手机直连耳机,"
+                    "绕过 GATT 加密句柄墙(攻击面⑦)")
+    ap.add_argument("--imp-duration", type=float, default=0.0,
+                    help="冒充运行秒数(0=跑到 Ctrl-C)")
     ap.add_argument("--decrypt", default=None, metavar="PCAP",
                     help="离线解密模式:加密 BLE pcap + 密钥 -> ATT/SMP 明文流"
                     "(阶段四 4.1,不碰硬件)")
@@ -153,6 +158,16 @@ def main():
                                      duration=args.server_duration,
                                      name=args.server_name,
                                      adb_serial=args.adb_serial))
+        if args.impersonate:
+            from roles import impersonation_fuzz
+            sys.exit(impersonation_fuzz.run(target, outdir,
+                                           serport=args.serport,
+                                           bt_keys_path=args.bt_keys,
+                                           keys_mac=args.keys_mac,
+                                           phone_mac=args.phone_mac,
+                                           duration=args.imp_duration,
+                                           max_cases=args.max_cases,
+                                           adb_serial=args.adb_serial))
         if args.discover_only:
             sys.exit(_discover_only(target, outdir, args.serport))
 

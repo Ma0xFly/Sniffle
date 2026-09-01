@@ -132,3 +132,20 @@ class LLCipherState:
                 self.last_sn[direction] = sn
                 return pt
         return None
+
+    def encrypt_packet(self, ll_header_byte, plaintext: bytes,
+                       direction: str) -> tuple:
+        """加密一个 LL data PDU(TX 用)。ll_header_byte=原始头字节 int(AAD 取
+        & 0xE3);返回 (ciphertext, mic)。推进该方向计数器(每新包 +1;重传由
+        固件处理,host 不重复加密 -- 固件管 TX SN,host 只按"新包计数"递增)。
+        与 decrypt_packet 对称:TX 用 counter[DIR_M2S],RX 用 counter[DIR_S2M]。
+        注意:encrypt 不跟踪 last_sn(固件自动管理 TX SN 位,host 侧只关心
+        新包计数递增;decrypt 侧才需要 SN 重传回扫)。"""
+        hdr = ll_header_byte[0] if isinstance(ll_header_byte,
+                                              (bytes, bytearray)) else ll_header_byte
+        aad = bytes([hdr & 0xE3])
+        c = self.counter[direction]
+        nonce = ccm_nonce(c, direction, self.iv)
+        ct, mic = ccm_encrypt(self.key, nonce, aad, plaintext)
+        self.counter[direction] = c + 1
+        return ct, mic

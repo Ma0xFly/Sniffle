@@ -27,6 +27,7 @@ import logging
 import os
 import time
 from pathlib import Path
+from struct import pack
 
 from sniffle.pcap import PcapBleWriter
 from sniffle.sniffle_hw import SniffleHW
@@ -267,17 +268,21 @@ def _wait_handshake_pdu(transport, opcode, timeout):
 
 
 def _do_encrypted_gatt(transport, target, outdir, record, duration, started):
-    """加密链路上做 GATT 发现 + 几个读,验证 0x05 句柄墙是否消失。"""
+    """加密链路上:先应答 peer 的 client burst(通用 mini GATT server 响应器),
+    再做 server 发现,再读原 0x05 墙 handle 验证墙消失。零设备特定常量。"""
     from core.session import FuzzSession
+    from core.gatt_map import discover
 
-    # 用 FuzzSession 做 GATT 发现(它内部用 transport.inject/recv_att,
-    # 加密已启用 -> 自动加密 TX/解密 RX)
+    # ---- 1. peer client burst 应答(双角色通用)----
+    # 握手后不要立即 discover:peer 可能先当 client 发 WRITE_REQ/L2CAP signaling。
+    # 通用应答后(peer 安静)再转 server 发现;纯 server 设备无 burst 直接发现。
+    log.info("listening for peer client burst (dual-role) ...")
+    _handle_peer_client_burst(transport, record)
+
+    # ---- 2. server 发现 ----
     session = FuzzSession(transport, target,
                           gatt_map_path=outdir / "gatt_enc.json",
-                          negotiate_mtu=False)   # MTU 已在握手前协商
-    # 不调 session.start()(它会 reconnect + setup_data_size);
-    # 直接 discover(链路已连已加密)
-    from core.gatt_map import discover
+                          negotiate_mtu=False)
     log.info("encrypted GATT discovery ...")
     gatt = discover(transport)
     if session.gatt_map_path:
@@ -291,14 +296,25 @@ def _do_encrypted_gatt(transport, target, outdir, record, duration, started):
         record(kind="gatt_service", uuid=s.uuid,
                start=s.start_handle, end=s.end_handle)
 
-    # 几个手工读:遍历前 5 个特征值句柄
+    # ---- 3. 0x05 墙验证:读原 0x05 handle,对照现响应 ----
+    # 通用:从阶段一台账里 grep 出原 0x05 拒绝的 handle 集(无写死 handle)
+    stage1_ledger = REPO / "att-fuzz" / "logs" / "run-20260830-181858" / "ledger.jsonl"
+    wall_handles = _load_0x05_handles(stage1_ledger)
+    log.info("0x05 wall handles from stage-1 ledger: %d (%s)",
+             len(wall_handles),
+             ",".join("0x%04X" % h for h in wall_handles[:12]) +
+             (" ..." if len(wall_handles) > 12 else ""))
+    record(kind="wall_handles_loaded", count=len(wall_handles),
+           source=str(stage1_ledger))
+
+    # 也读发现的特征(前几个可读的),与 0x05 handle 并行对照
+    discover_handles = [ch.value_handle for ch in gatt.characteristics[:5]
+                        if ch.props & 0x02]
+    read_handles = (wall_handles[:8] + discover_handles)[:12]
     read_count = 0
-    for ch in gatt.characteristics[:5]:
-        if not (ch.props & 0x02):   # 跳过不可读
-            continue
+    for handle in read_handles:
         if duration and time.time() - started >= duration:
             break
-        handle = ch.value_handle
         log.info("encrypted read handle 0x%04X ...", handle)
         try:
             transport.inject(read_req(handle))
@@ -308,14 +324,123 @@ def _do_encrypted_gatt(transport, target, outdir, record, duration, started):
             record(kind="read_drop", handle=handle, error=str(e))
             break
         if rsp is None:
-            log.warning("read handle 0x%04X -> no response (encrypted)", handle)
+            log.warning("read handle 0x%04X -> no response", handle)
             record(kind="read_timeout", handle=handle)
         else:
             op = rsp.pdu[0]
-            log.info("read handle 0x%04X -> op=0x%02X len=%d", handle, op,
-                     len(rsp.pdu))
+            err = rsp.pdu[1] if op == 0x01 and len(rsp.pdu) >= 5 else None
+            tag = "0x05(wall persists!)" if err == 0x05 else \
+                  ("err=0x%02X" % err if err is not None else "OK")
+            log.info("read handle 0x%04X -> op=0x%02X %s", handle, op, tag)
             record(kind="read_ok", handle=handle, op=op,
-                   pdu=rsp.pdu.hex()[:64])
+                   error_code=err, pdu=rsp.pdu.hex()[:64])
             read_count += 1
     log.info("encrypted reads done: %d ok", read_count)
     record(kind="reads_done", count=read_count)
+
+
+# ---- 双角色 GATT 处理(跟进轮) ----
+# 通用 mini GATT server 响应器:peer 作为 client 先发 WRITE_REQ/L2CAP signaling,
+# 我们应答后再做 server 发现。零设备特定常量(无写死 handle/opcode/MAC)。
+
+# L2CAP LE signaling 请求码 -> 响应码(规范 req/rsp 配对)
+_L2CAP_SIG_REQ_RSP = {0x01: None, 0x12: 0x13, 0x14: 0x15, 0x17: 0x18}
+# 0x01=Command Reject(本身就是 rsp);0x12=Conn Param Update Req->0x13 Rsp;
+# 0x14=LE Credit Based Conn Req->0x15 Rsp;0x17=同 0x14 的扩展(双向)。
+# indication 类(无响应):0x16 LE Flow Control Credit Ind。
+_L2CAP_SIG_INDICATIONS = {0x16}
+
+
+def _handle_peer_client_burst(transport, record, burst_timeout=3.0,
+                              max_pdus=40):
+    """握手后先听 peer 的 client 请求 burst,通用应答,直到安静 N 秒或上限。
+    兼容纯 server 设备:若 peer 不发任何 client 请求,直接返回(转入发现)。
+    返回应答的 PDU 数。"""
+    from struct import pack
+    deadline = time.monotonic() + burst_timeout
+    count = 0
+    idle = 0
+    while count < max_pdus and time.monotonic() < deadline:
+        # 先查非 ATT(L2CAP signaling / SMP),再查 ATT;两者都空则短超时泵
+        na = transport.recv_non_att(timeout=0.15)
+        if na is not None:
+            cid, sdu = na
+            _respond_l2cap(transport, cid, sdu)
+            count += 1
+            deadline = time.monotonic() + 1.5   # 活动则续命
+            idle = 0
+            continue
+        att = transport.recv_att(timeout=0.15)
+        if att is not None:
+            _respond_att(transport, att.pdu)
+            count += 1
+            deadline = time.monotonic() + 1.5
+            idle = 0
+            continue
+        idle += 1
+        if idle >= 4:   # ~0.6s 无 incoming -> burst 结束
+            break
+    log.info("peer client burst handled: %d PDUs answered", count)
+    record(kind="peer_burst_handled", count=count)
+    return count
+
+
+def _respond_att(transport, pdu: bytes):
+    """通用 ATT 响应(无写死 handle)。WRITE_REQ->WRITE_RSP;READ_REQ->READ_RSP 空;
+    INDICATE->CONFIRM;WRITE_CMD/NOTIFY 无响应;未知忽略。"""
+    if not pdu:
+        return
+    op = pdu[0]
+    if op == AttOpcode.WRITE_REQ:            # 0x12 -> 0x13
+        transport.inject(bytes([AttOpcode.WRITE_RSP]))
+        log.debug("peer WRITE_REQ (handle 0x%02X%02X) -> WRITE_RSP",
+                  pdu[2], pdu[1])
+    elif op == AttOpcode.READ_REQ:           # 0x0A -> 0x0B 空
+        transport.inject(bytes([AttOpcode.READ_RSP]))
+    elif op == AttOpcode.HANDLE_VALUE_IND:   # 0x1D -> 0x1E
+        transport.inject(bytes([AttOpcode.HANDLE_VALUE_CNF]))
+    # WRITE_CMD(0x52)/NOTIFY(0x1B)/其他:无响应
+    elif op == AttOpcode.WRITE_CMD or op == AttOpcode.HANDLE_VALUE_NTF:
+        log.debug("peer %s (no response needed)", AttOpcode(op).name)
+
+
+def _respond_l2cap(transport, cid: int, sdu: bytes):
+    """通用 L2CAP 响应。CID 0x0005(LE signaling):req 码回配对 rsp;indication 无响应;
+    未知码回 Command Reject(0x01,command not understood)。SMP(CID 6)不在此处应答
+    (配对由上层/角色驱动,不通用代答)。"""
+    if cid != 0x0005 or len(sdu) < 4:
+        return
+    code, ident = sdu[0], sdu[1]
+    data = sdu[4:]
+    if code in _L2CAP_SIG_INDICATIONS:
+        log.debug("peer L2CAP signaling ind code=0x%02X (no response)", code)
+        return
+    rsp_code = _L2CAP_SIG_REQ_RSP.get(code)
+    if rsp_code is not None:
+        rsp = bytes([rsp_code, ident]) + pack("<H", len(data)) + data
+    else:
+        # 未知 req 码 -> Command Reject(0x01,"command not understood"=0x0000)
+        reject_data = pack("<H", 0x0000)
+        rsp = bytes([0x01, ident]) + pack("<H", len(reject_data)) + reject_data
+    # L2CAP 帧:len + cid(5) + signaling
+    l2 = pack("<HH", len(rsp), 0x0005) + rsp
+    transport.inject_raw([(2, l2)])
+    log.debug("peer L2CAP signaling code=0x%02X -> rsp code=0x%02X", code,
+              rsp[0])
+
+
+def _load_0x05_handles(ledger_path: Path) -> list:
+    """从阶段一台账里 grep 出原 0x05(Insufficient Authentication)拒绝的 handle 集。
+    通用:遍历 ledger.jsonl,收 error_code==0x05 的 handle,去重排序。"""
+    handles = set()
+    if not ledger_path.is_file():
+        return []
+    with ledger_path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("error_code") == 0x05 and rec.get("handle") is not None:
+                handles.add(int(rec["handle"]))
+    return sorted(handles)

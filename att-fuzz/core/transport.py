@@ -175,6 +175,7 @@ class SniffleTransport:
         self._enc_enabled = False
         self._enc_cipher: bt_crypto.LLCipherState | None = None
         self._enc_handshake_q: list = []   # [(opcode, payload_bytes), ...]
+        self._non_att_q: list = []         # [(cid, sdu_bytes), ...] 非 ATT L2CAP(SMP/CID-5 signaling 等)
 
     def add_event_listener(self, fn):
         """订阅 _log_event 事件流。fn(rec: dict) 在传输层线程内同步调用,
@@ -449,6 +450,7 @@ class SniffleTransport:
         self._enc_enabled = False
         self._enc_cipher = None
         self._enc_handshake_q = []
+        self._non_att_q = []
 
     # ---------- 加密层(LL_ENC 握手后启用)----------
 
@@ -703,6 +705,23 @@ class SniffleTransport:
                 raise drop
         return None
 
+    def recv_non_att(self, timeout: float = 0.5):
+        """取一条非 ATT L2CAP SDU(SMP CID 6 / LE signaling CID 5 等);超时 None。
+        冒充双角色时用来应答 peer 的 L2CAP signaling 请求。"""
+        if self._non_att_q:
+            return self._non_att_q.pop(0)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self._pump(deadline)
+            if self._non_att_q:
+                return self._non_att_q.pop(0)
+            if self._link_dropped:
+                drop = self._link_dropped
+                self._link_dropped = None
+                self._link_up = False
+                raise drop
+        return None
+
     def _pump(self, deadline: float) -> AttPacket | None:
         """排空串口,处理消息;返回首个完整 ATT PDU(如有)。"""
         while time.monotonic() < deadline:
@@ -795,6 +814,7 @@ class SniffleTransport:
             return None
         if cid != ATT_CID:
             self._log_event("non_att_sdu", cid=cid, len=len(sdu))
+            self._non_att_q.append((cid, sdu))
             return None
         self._log_event("rx_att", pdu=sdu.hex(), event=dpkt.event)
         return AttPacket(pdu=sdu, event=dpkt.event, ts=dpkt.ts_epoch,

@@ -924,3 +924,73 @@ assert "--impersonate" in _proc.stdout, "runner --help 应含 --impersonate"
 assert "--imp-duration" in _proc.stdout, "runner --help 应含 --imp-duration"
 assert "--phone-mac" in _proc.stdout, "runner --help 应含 --phone-mac"
 print("--impersonate CLI 参数接线自测通过")
+
+# 12) 阶段四 4.3 跟进:双角色 GATT 响应器 + 0x05 handle 加载(通用,无写死常量)
+from roles import impersonation_fuzz as _imp
+from core.att import AttOpcode as _AO
+
+class _MockTx:
+    """记录 inject/inject_raw 调用(不碰硬件)。"""
+    def __init__(self):
+        self.sent = []
+    def inject(self, pdu, gate_at=None):
+        self.sent.append(("att", pdu))
+    def inject_raw(self, frags, gate_at=None):
+        for llid, p in frags:
+            self.sent.append(("raw", llid, p))
+
+# _respond_att:WRITE_REQ->WRITE_RSP;READ_REQ->READ_RSP;INDICATE->CONFIRM;
+# WRITE_CMD/NOTIFY 无响应;未知忽略
+_mt = _MockTx()
+_imp._respond_att(_mt, bytes([_AO.WRITE_REQ, 0x5d, 0x00, 0x01, 0x00]))   # WRITE_REQ handle 0x005D
+assert _mt.sent[-1] == ("att", bytes([_AO.WRITE_RSP]))
+_imp._respond_att(_mt, bytes([_AO.READ_REQ, 0x03, 0x00]))                  # READ_REQ handle 3
+assert _mt.sent[-1] == ("att", bytes([_AO.READ_RSP]))
+_imp._respond_att(_mt, bytes([_AO.HANDLE_VALUE_IND, 0x10, 0x00, 0xaa]))    # INDICATE
+assert _mt.sent[-1] == ("att", bytes([_AO.HANDLE_VALUE_CNF]))
+_n0 = len(_mt.sent)
+_imp._respond_att(_mt, bytes([_AO.WRITE_CMD, 0x01, 0x00, 0xff]))          # WRITE_CMD 无响应
+_imp._respond_att(_mt, bytes([_AO.HANDLE_VALUE_NTF, 0x10, 0x00, 0xbb]))   # NOTIFY 无响应
+assert len(_mt.sent) == _n0
+_imp._respond_att(_mt, bytes([0xFF]))                                       # 未知忽略
+assert len(_mt.sent) == _n0
+print("双角色 ATT 响应器自测通过")
+
+# _respond_l2cap:CID 0x0005 req 码回配对 rsp;indication 无响应;未知码回 Command Reject
+# LE Connection Parameter Update Req(code 0x12,ident 0x07,data=间隔参数)
+_param_req = bytes([0x12, 0x07, 0x08, 0x00, 0x18, 0x00, 0x28, 0x00, 0x00, 0x00, 0xc8, 0x00])
+_mt2 = _MockTx()
+_imp._respond_l2cap(_mt2, 0x0005, _param_req)
+assert len(_mt2.sent) == 1 and _mt2.sent[0][0] == "raw"
+_l2 = _mt2.sent[0][2]   # L2CAP 帧
+_l2len, _l2cid = _h("%02x%02x" % (_l2[1], _l2[0])), int.from_bytes(_l2[2:4], "little") if False else 0
+# 解析 L2CAP:len(2)+cid(2)=0x0005+signaling
+import struct as _st
+_l2len, _l2cid = _st.unpack("<HH", _l2[:4])
+assert _l2cid == 0x0005
+_sig = _l2[4:]
+assert _sig[0] == 0x13 and _sig[1] == 0x07    # rsp code 0x13, ident 回显 0x07
+assert _sig[4:] == _param_req[4:]              # data 回显
+# indication(0x16 LE Flow Control Credit Ind)->无响应
+_mt3 = _MockTx()
+_imp._respond_l2cap(_mt3, 0x0005, bytes([0x16, 0x01, 0x02, 0x00, 0x00, 0x00]))
+assert len(_mt3.sent) == 0
+# 未知 req 码->Command Reject(0x01)
+_mt4 = _MockTx()
+_imp._respond_l2cap(_mt4, 0x0005, bytes([0x99, 0x05, 0x00, 0x00]))
+assert _mt4.sent[0][2][4] == 0x01 and _mt4.sent[0][2][5] == 0x05  # code=0x01 ident 回显
+# 非 CID-5 不应答
+assert _imp._respond_l2cap(_MockTx(), 0x0006, b"\x01\x02\x03\x04") is None
+print("双角色 L2CAP 响应器自测通过")
+
+# _load_0x05_handles:从台账 grep error_code==0x05 的 handle,去重排序
+_ledg = Path(_tmp) / "wall_ledger.jsonl"
+_ledg.write_text(
+    '{"case_id":"x","error_code":5,"handle":10}\n'
+    '{"case_id":"y","error_code":0x02,"handle":5}\n'
+    '{"case_id":"z","error_code":5,"handle":10}\n'
+    '{"case_id":"w","error_code":5,"handle":3}\n', encoding="utf-8")
+_wh = _imp._load_0x05_handles(_ledg)
+assert _wh == [3, 10], _wh
+assert _imp._load_0x05_handles(Path(_tmp) / "nope.jsonl") == []
+print("0x05 handle 加载器自测通过")

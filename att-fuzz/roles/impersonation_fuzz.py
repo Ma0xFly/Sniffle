@@ -61,21 +61,29 @@ def make_transport(serport, target: dict, outdir: Path) -> SniffleTransport:
 def run(target: dict, outdir: Path, serport=None,
         bt_keys_path: str | None = None, keys_mac: str | None = None,
         phone_mac: str | None = None, duration: float = 0.0,
-        max_cases: int = 0, adb_serial: str | None = None) -> int:
+        max_cases: int = 0, adb_serial: str | None = None,
+        strategy_paths=None, seed: int = 1, rounds: int = 0,
+        round_budget: int = 100, wall_ledger=None) -> int:
     """加密冒充主入口。duration>0 为运行秒数上限;0 表示一直跑到 Ctrl-C。
     bt_keys_path:Android bt_config.conf 或提取 JSON。
     keys_mac:bt_config 里目标设备(耳机)MAC(书写序)。
     phone_mac:手机 public MAC(书写序) -- 我们冒充这个地址。
+    strategy_paths:认证面语料(策略目录/文件);None=不跑语料循环(只做墙验证读)。
+    wall_ledger:阶段一台账路径(Path/str),供 0x05 墙 handle 加载;None=跳过墙验证。
     返回 0=正常结束,非 0=出错。"""
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     with serial_guard(serport or target.get("serport"), "CLI impersonation(加密冒充)"):
         return _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
-                           phone_mac, duration, max_cases, adb_serial)
+                           phone_mac, duration, max_cases, adb_serial,
+                           strategy_paths, seed, rounds, round_budget,
+                           wall_ledger)
 
 
 def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
-                phone_mac, duration, max_cases, adb_serial) -> int:
+                phone_mac, duration, max_cases, adb_serial,
+                strategy_paths, seed, rounds, round_budget,
+                wall_ledger) -> int:
     transport = make_transport(serport, target, outdir)
     ledger_path = outdir / "impersonation_ledger.jsonl"
     started = time.time()
@@ -122,7 +130,9 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
             record(kind="conn_start", conn=conn_no)
             try:
                 _do_one_connection(transport, target, ltk_wire, outdir,
-                                   phone_wire, record, duration, started)
+                                   phone_wire, record, duration, started,
+                                   strategy_paths, seed, max_cases, rounds,
+                                   round_budget, wall_ledger)
             except LinkDrop as drop:
                 log.warning("link dropped: %s", drop)
                 record(kind="link_drop", source=drop.source,
@@ -151,12 +161,42 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
 
 
 def _do_one_connection(transport, target, ltk_wire, outdir, phone_wire,
-                        record, duration, started):
-    """单次冒充连接:connect -> LL_ENC 握手 -> GATT 发现 -> 几个读。"""
+                        record, duration, started,
+                        strategy_paths, seed, max_cases, rounds,
+                        round_budget, wall_ledger):
+    """单次冒充连接:握手+发现(_handshake_and_setup)-> 加密 GATT(墙验证+语料)。"""
+    gatt = _handshake_and_setup(transport, target, ltk_wire, phone_wire, record,
+                               outdir=outdir)
+    if gatt is None:
+        return
+
+    _do_encrypted_gatt(transport, target, outdir, record, duration, started,
+                       gatt, strategy_paths, seed, max_cases, rounds,
+                       round_budget, wall_ledger, ltk_wire, phone_wire)
+
+    # 正常断链
+    if transport.link_up:
+        try:
+            transport.disconnect()
+        except Exception as e:
+            log.warning("disconnect failed: %s", e)
+
+
+def _handshake_and_setup(transport, target, ltk_wire, phone_wire, record,
+                        outdir=None):
+    """connect -> DLE/MTU -> LL ENC 握手 -> peer client burst 应答 -> GATT 发现。
+    成功返回 GattMap;失败(连接/握手出错)返回 None(由调用方决定后续)。"""
+    from core.gatt_map import discover
+
     # ---- 3. 发起连接(冒充手机地址) ----
     log.info("connecting to target %s as %s ...", target.get("mac", "?"),
              phone_wire.hex())
-    transport.connect(target, our_addr=phone_wire, our_addr_random=False)
+    try:
+        transport.connect(target, our_addr=phone_wire, our_addr_random=False)
+    except (LinkDrop, TransportError) as e:
+        log.warning("connect failed: %s", e)
+        record(kind="connect_failed", error=str(e))
+        return None
     log.info("connected: aa=%08X", transport.aa or 0)
     record(kind="connected", aa="%08X" % (transport.aa or 0))
 
@@ -167,20 +207,58 @@ def _do_one_connection(transport, target, ltk_wire, outdir, phone_wire,
     record(kind="data_size", ll_max=transport.ll_max,
            att_mtu=transport.att_mtu)
 
-    # ---- 5. 驱动 LL_ENC 握手 ----
-    _drive_enc_handshake(transport, ltk_wire, record)
+    # ---- 5. 驱动 LL ENC 握手 ----
+    try:
+        _drive_enc_handshake(transport, ltk_wire, record)
+    except ImpersonationError as e:
+        log.error("handshake failed: %s", e)
+        record(kind="handshake_failed", error=str(e))
+        return None
     log.info("encryption engaged -- link is now encrypted")
     record(kind="enc_engaged")
 
-    # ---- 6. 加密链路 GATT 发现 + 几个读 ----
-    _do_encrypted_gatt(transport, target, outdir, record, duration, started)
-
-    # 正常断链
-    if transport.link_up:
+    # ---- 6. peer client burst 应答 + server 发现 ----
+    _handle_peer_client_burst(transport, record)
+    log.info("encrypted GATT discovery ...")
+    gatt = discover(transport)
+    gatt_path = outdir / "gatt_enc.json" if outdir else None
+    if gatt_path:
         try:
-            transport.disconnect()
+            gatt.save(gatt_path)
         except Exception as e:
-            log.warning("disconnect failed: %s", e)
+            log.warning("gatt map save failed: %s", e)
+    log.info("GATT: %d services, %d characteristics",
+             len(gatt.services), len(gatt.characteristics))
+    record(kind="gatt_discovered", services=len(gatt.services),
+           chars=len(gatt.characteristics))
+    for s in gatt.services:
+        log.info("  service %s [%04X-%04X]", s.uuid, s.start_handle, s.end_handle)
+        record(kind="gatt_service", uuid=s.uuid,
+               start=s.start_handle, end=s.end_handle)
+    return gatt
+
+
+def _reconnect_encrypted(transport, target, ltk_wire, phone_wire, record):
+    """ATT_FREEZE/LinkDrop 后重连:断 -> 连 -> DLE/MTU -> 握手 -> burst。
+    不重发现(GATT 地图不变,复用调用方持有的 gatt);重连次数由调用方闭包
+    计数器限流(每次 _do_encrypted_gatt 调用重置)。
+    返回 True=重连成功(新加密会话就绪),False=失败。"""
+    try:
+        if transport.link_up:
+            try:
+                transport.disconnect()
+            except Exception as e:
+                log.warning("disconnect before reconnect failed: %s", e)
+        log.info("reconnecting (impersonation) as %s ...", phone_wire.hex())
+        transport.connect(target, our_addr=phone_wire, our_addr_random=False)
+        transport.setup_data_size()
+        _drive_enc_handshake(transport, ltk_wire, record)
+        _handle_peer_client_burst(transport, record)
+        log.info("reconnect ok -- encrypted link re-established")
+        return True
+    except (LinkDrop, TransportError, ImpersonationError) as e:
+        log.warning("reconnect failed: %s", e)
+        return False
 
 
 def _drive_enc_handshake(transport, ltk_wire, record):
@@ -267,76 +345,105 @@ def _wait_handshake_pdu(transport, opcode, timeout):
     return None
 
 
-def _do_encrypted_gatt(transport, target, outdir, record, duration, started):
-    """加密链路上:先应答 peer 的 client burst(通用 mini GATT server 响应器),
-    再做 server 发现,再读原 0x05 墙 handle 验证墙消失。零设备特定常量。"""
+def _do_encrypted_gatt(transport, target, outdir, record, duration, started,
+                       gatt, strategy_paths, seed, max_cases, rounds,
+                       round_budget, wall_ledger, ltk_wire, phone_wire):
+    """加密链路上:0x05 墙验证读 + 认证面语料循环。
+    gatt:已在 _handshake_and_setup 发现的加密 GATT 地图(复用,不重发现)。
+    wall_ledger:阶段一台账路径(Path/str/None);None=跳过 0x05 墙验证。
+    零设备特定常量(handle 全部来自台账或发现,无写死)。"""
+    # ---- 0x05 墙验证:读原 0x05 拒绝的 handle,对照现响应 ----
+    # 通用:从阶段一台账 grep 出原 0x05 拒绝的 handle 集(无写死 handle)。
+    # wall_ledger=None 时跳过墙验证(无阶段一台账,直接进语料循环)。
+    if wall_ledger is not None:
+        wall_ledger_path = Path(wall_ledger)
+        wall_handles = _load_0x05_handles(wall_ledger_path)
+        log.info("0x05 wall handles from stage-1 ledger: %d (%s)",
+                 len(wall_handles),
+                 ",".join("0x%04X" % h for h in wall_handles[:12]) +
+                 (" ..." if len(wall_handles) > 12 else ""))
+        record(kind="wall_handles_loaded", count=len(wall_handles),
+               source=str(wall_ledger_path))
+
+        # 也读发现的特征(前几个可读的),与 0x05 handle 并行对照
+        discover_handles = [ch.value_handle for ch in gatt.characteristics[:5]
+                            if ch.props & 0x02]
+        read_handles = (wall_handles[:8] + discover_handles)[:12]
+        read_count = 0
+        for handle in read_handles:
+            if duration and time.time() - started >= duration:
+                break
+            log.info("encrypted read handle 0x%04X ...", handle)
+            try:
+                transport.inject(read_req(handle))
+                rsp = transport.recv_att(timeout=transport.response_timeout)
+            except LinkDrop as e:
+                log.warning("read handle 0x%04X -> link drop: %s", handle, e)
+                record(kind="read_drop", handle=handle, error=str(e))
+                break
+            if rsp is None:
+                log.warning("read handle 0x%04X -> no response", handle)
+                record(kind="read_timeout", handle=handle)
+            else:
+                op = rsp.pdu[0]
+                err = rsp.pdu[1] if op == 0x01 and len(rsp.pdu) >= 5 else None
+                tag = "0x05(wall persists!)" if err == 0x05 else \
+                      ("err=0x%02X" % err if err is not None else "OK")
+                log.info("read handle 0x%04X -> op=0x%02X %s", handle, op, tag)
+                record(kind="read_ok", handle=handle, op=op,
+                       error_code=err, pdu=rsp.pdu.hex()[:64])
+                read_count += 1
+        log.info("encrypted reads done: %d ok", read_count)
+        record(kind="reads_done", count=read_count)
+    else:
+        log.info("no wall ledger, skipping 0x05 validation")
+        record(kind="wall_validation_skipped")
+
+    # ---- 4. 认证面语料循环 ----
+    # FuzzSession 复用已加密 transport(negotiate_mtu=False,MTU 已在明文段协商)。
+    # gatt 地图直接注入,跳过重发现。no_mtu_negotiate_meta=False:加密链路不再
+    # 断链重协,保持当前协商态。ATT_FREEZE/LinkDrop 走加密重连回调。
+    if not strategy_paths:
+        log.info("no strategy paths -- skipping corpus loop")
+        return
     from core.session import FuzzSession
-    from core.gatt_map import discover
+    from core.fuzz_loop import run_corpus_loop
+    from core.monitor import Ledger
 
-    # ---- 1. peer client burst 应答(双角色通用)----
-    # 握手后不要立即 discover:peer 可能先当 client 发 WRITE_REQ/L2CAP signaling。
-    # 通用应答后(peer 安静)再转 server 发现;纯 server 设备无 burst 直接发现。
-    log.info("listening for peer client burst (dual-role) ...")
-    _handle_peer_client_burst(transport, record)
+    fuzz_session = FuzzSession(transport, target, gatt_map_path=None,
+                               ledger=Ledger(str(outdir / "fuzz_ledger.jsonl")),
+                               negotiate_mtu=False)
+    fuzz_session.gatt = gatt   # 已发现的加密 GATT 地图,跳过重发现
 
-    # ---- 2. server 发现 ----
-    session = FuzzSession(transport, target,
-                          gatt_map_path=outdir / "gatt_enc.json",
-                          negotiate_mtu=False)
-    log.info("encrypted GATT discovery ...")
-    gatt = discover(transport)
-    if session.gatt_map_path:
-        gatt.save(session.gatt_map_path)
-    log.info("GATT: %d services, %d characteristics",
-             len(gatt.services), len(gatt.characteristics))
-    record(kind="gatt_discovered", services=len(gatt.services),
-           chars=len(gatt.characteristics))
-    for s in gatt.services:
-        log.info("  service %s [%04X-%04X]", s.uuid, s.start_handle, s.end_handle)
-        record(kind="gatt_service", uuid=s.uuid,
-               start=s.start_handle, end=s.end_handle)
+    # 重连计数器(闭包 mutable):每次 _do_encrypted_gatt 调用重置
+    reconnect_count = [0]
 
-    # ---- 3. 0x05 墙验证:读原 0x05 handle,对照现响应 ----
-    # 通用:从阶段一台账里 grep 出原 0x05 拒绝的 handle 集(无写死 handle)
-    stage1_ledger = REPO / "att-fuzz" / "logs" / "run-20260830-181858" / "ledger.jsonl"
-    wall_handles = _load_0x05_handles(stage1_ledger)
-    log.info("0x05 wall handles from stage-1 ledger: %d (%s)",
-             len(wall_handles),
-             ",".join("0x%04X" % h for h in wall_handles[:12]) +
-             (" ..." if len(wall_handles) > 12 else ""))
-    record(kind="wall_handles_loaded", count=len(wall_handles),
-           source=str(stage1_ledger))
+    def _on_freeze(_s):
+        reconnect_count[0] += 1
+        if reconnect_count[0] > 3:
+            log.warning("freeze reconnect limit reached")
+            return False
+        ok = _reconnect_encrypted(transport, target, ltk_wire, phone_wire, record)
+        if ok:
+            fuzz_session.gatt = gatt   # 重连不重发现,复用同一地图
+        return ok
 
-    # 也读发现的特征(前几个可读的),与 0x05 handle 并行对照
-    discover_handles = [ch.value_handle for ch in gatt.characteristics[:5]
-                        if ch.props & 0x02]
-    read_handles = (wall_handles[:8] + discover_handles)[:12]
-    read_count = 0
-    for handle in read_handles:
-        if duration and time.time() - started >= duration:
-            break
-        log.info("encrypted read handle 0x%04X ...", handle)
-        try:
-            transport.inject(read_req(handle))
-            rsp = transport.recv_att(timeout=transport.response_timeout)
-        except LinkDrop as e:
-            log.warning("read handle 0x%04X -> link drop: %s", handle, e)
-            record(kind="read_drop", handle=handle, error=str(e))
-            break
-        if rsp is None:
-            log.warning("read handle 0x%04X -> no response", handle)
-            record(kind="read_timeout", handle=handle)
-        else:
-            op = rsp.pdu[0]
-            err = rsp.pdu[1] if op == 0x01 and len(rsp.pdu) >= 5 else None
-            tag = "0x05(wall persists!)" if err == 0x05 else \
-                  ("err=0x%02X" % err if err is not None else "OK")
-            log.info("read handle 0x%04X -> op=0x%02X %s", handle, op, tag)
-            record(kind="read_ok", handle=handle, op=op,
-                   error_code=err, pdu=rsp.pdu.hex()[:64])
-            read_count += 1
-    log.info("encrypted reads done: %d ok", read_count)
-    record(kind="reads_done", count=read_count)
+    def _on_link_drop():
+        reconnect_count[0] += 1
+        if reconnect_count[0] > 3:
+            log.warning("link-drop reconnect limit reached")
+            return False
+        ok = _reconnect_encrypted(transport, target, ltk_wire, phone_wire, record)
+        if ok:
+            fuzz_session.gatt = gatt
+        return ok
+
+    stats = run_corpus_loop(fuzz_session, strategy_paths, fuzz_session.ledger,
+                            gatt, transport, seed=seed, max_cases=max_cases,
+                            rounds=rounds, round_budget=round_budget,
+                            on_freeze=_on_freeze, on_link_drop=_on_link_drop,
+                            no_mtu_negotiate_meta=False)
+    record(kind="corpus_done", **stats)
 
 
 # ---- 双角色 GATT 处理(跟进轮) ----

@@ -85,6 +85,9 @@ def main():
                     "绕过 GATT 加密句柄墙(攻击面⑦)")
     ap.add_argument("--imp-duration", type=float, default=0.0,
                     help="冒充运行秒数(0=跑到 Ctrl-C)")
+    ap.add_argument("--wall-ledger", default=None, metavar="PATH",
+                    help="冒充模式下阶段一台账路径(ledger.jsonl),供 0x05 墙"
+                    "handle 加载;缺省=跳过 0x05 墙验证,直接进语料循环")
     ap.add_argument("--decrypt", default=None, metavar="PCAP",
                     help="离线解密模式:加密 BLE pcap + 密钥 -> ATT/SMP 明文流"
                     "(阶段四 4.1,不碰硬件)")
@@ -167,7 +170,12 @@ def main():
                                            phone_mac=args.phone_mac,
                                            duration=args.imp_duration,
                                            max_cases=args.max_cases,
-                                           adb_serial=args.adb_serial))
+                                           adb_serial=args.adb_serial,
+                                           strategy_paths=strategy,
+                                           seed=args.seed,
+                                           rounds=args.rounds,
+                                           round_budget=args.round_budget,
+                                           wall_ledger=args.wall_ledger))
         if args.discover_only:
             sys.exit(_discover_only(target, outdir, args.serport))
 

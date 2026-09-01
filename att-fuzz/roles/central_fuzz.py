@@ -7,22 +7,19 @@ runner.py 先把 att-fuzz/ 与 python_cli/ 加进 sys.path,本模块用绝对导
 """
 
 import logging
-import os
-import time
 from pathlib import Path
 
 from sniffle.pcap import PcapBleWriter
 from sniffle.sniffle_hw import SniffleHW
 
-from core.corpus import CaseStep, expand, load_yaml_files
-from core.monitor import ALERT_CLASSIFICATIONS, Ledger
+from core.corpus import CaseStep
+from core.fuzz_loop import run_corpus_loop
+from core.monitor import Ledger
 from core.serial_lock import guard as serial_guard
 from core.session import FuzzSession
 from core.transport import SniffleTransport
 
 log = logging.getLogger("att-fuzz.central")
-
-REPO = Path(__file__).resolve().parents[2]   # 仓库根(att-fuzz/roles/..)
 
 
 def make_transport(serport, target: dict, outdir: Path) -> SniffleTransport:
@@ -89,92 +86,12 @@ def _run_locked(target, strategy_paths, outdir, serport, seed,
         log.info("replay result: %s", r.summary())
         return 0
 
-    raw_cases = load_yaml_files(strategy_paths)
-    cases = expand(raw_cases, gatt, transport.att_mtu, seed)
-    if max_cases:
-        cases = cases[:max_cases]
-    log.info("corpus: %d raw -> %d concrete cases", len(raw_cases), len(cases))
-
-    # 变异轮生成器:第一轮确定性语料 + 追加变异轮(rounds>0)。
-    # 变异轮以"产生新签名的用例 + 告警用例"为种子池,能量加权抽样后变异;
-    # 每轮预算 round_budget 个用例,预算耗尽进下一轮。签名库跨 run 累积(git 忽略)。
-    def _iter_cases():
-        yield from cases
-        if not rounds:
-            return
-        from core.mutator import Mutator, SignatureDb, collect_seeds
-        # 签名库路径与扫描目录可用 env 覆盖(离线测试隔离,避免被真实 run 的
-        # 合规 signature 占满种子判定);默认跨 run 累积于 logs/signatures.json。
-        sigdb_env = os.environ.get("ATT_FUZZ_SIGDB")
-        scan_env = os.environ.get("ATT_FUZZ_SIGSCAN")
-        sigdb_path = Path(sigdb_env) if sigdb_env else \
-            (REPO / "att-fuzz" / "logs" / "signatures.json")
-        scan_dir = Path(scan_env) if scan_env else (REPO / "att-fuzz" / "logs")
-        db = SignatureDb(sigdb_path)
-        db.scan_runs(scan_dir)
-        for round_no in range(1, rounds + 1):
-            seeds = collect_seeds([ledger.path], db)
-            if not seeds:
-                log.info("round %d: no seeds (no alerts / no new signatures), stop",
-                         round_no)
-                break
-            mut = Mutator(db, seed * 100 + round_no, transport.att_mtu)
-            made = 0
-            log.info("round %d: %d seeds, budget %d", round_no, len(seeds),
-                     round_budget)
-            while made < round_budget:
-                seed_case = mut.pick_seed(seeds)
-                yield mut.mutate(seed_case, round_no)
-                made += 1
-            db.scan_runs(scan_dir)   # 本轮新签名/告警入库
-            db.save()
-
-    started = time.time()
-    alerts = done = 0
-    try:
-        for case in _iter_cases():
-            # 用例可能要求未协商链路(⑤层):按需切换连接协商状态
-            session.ensure_negotiation(not case.meta.get("no_mtu_negotiate", False))
-            if case.steps is not None:
-                step_ctx = []
-                for s in case.steps:
-                    if s.raw_frames is not None:
-                        step_ctx.append({"frames": [{"llid": llid,
-                                                     "payload": payload.hex()}
-                                                    for llid, payload in s.raw_frames],
-                                         "expect_response": s.expect_response,
-                                         "observe": s.observe, "gate_at": s.gate_at})
-                    else:
-                        step_ctx.append({"pdu": s.pdu.hex(),
-                                         "expect_response": s.expect_response,
-                                         "observe": s.observe,
-                                         "gate_at": s.gate_at})
-                r = session.run_sequence(
-                        case.id, case.layer, case.steps,
-                        replay_ctx={"kind": "sequence", "steps": step_ctx})
-            else:
-                expect = case.meta.get("op") != "write_cmd"
-                r = session.run_case(case.id, case.layer,
-                        lambda c=case: c.pdu,
-                        replay_ctx={"pdu": case.pdu.hex(),
-                                    "expect_response": expect},
-                        expect_response=expect)
-            done += 1
-            if r.classification in ALERT_CLASSIFICATIONS:
-                alerts += 1
-            if done % 50 == 0:
-                log.info("progress %d/%d (%.1f/min), alerts=%d",
-                         done, len(cases),
-                         done / max(time.time() - started, 1) * 60, alerts)
-    except KeyboardInterrupt:
-        log.info("interrupted by user")
-    finally:
-        stats = ledger.stats()
-        log.info("=== run summary ===")
-        log.info("cases: %d, elapsed: %.1f min, alerts: %d",
-                 done, (time.time() - started) / 60, alerts)
-        for cls, n in sorted(stats.items()):
-            log.info("  %-20s %d", cls, n)
-        log.info("ledger: %s", ledger.path)
-        log.info("pcap:   %s", outdir / "capture.pcap")
+    # 确定性语料 + 变异轮循环(主体在 core.fuzz_loop,central 与加密冒充复用)。
+    # ATT_FREEZE/LinkDrop 回调:重连(re-negotiate + re-discover)后续跑。
+    run_corpus_loop(session, strategy_paths, ledger, gatt, transport,
+                    seed=seed, max_cases=max_cases, rounds=rounds,
+                    round_budget=round_budget,
+                    on_freeze=lambda s: s.start() is not None,
+                    on_link_drop=lambda: session.start() is not None)
+    log.info("pcap:   %s", outdir / "capture.pcap")
     return 0

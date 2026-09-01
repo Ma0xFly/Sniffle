@@ -21,7 +21,13 @@
    + SDU 流(ATT/SMP,CID 标注,明文/密文阶段都收)。
 
 LTK 字节序定案(以新鲜抓包 MIC 验证为准,验证后在此落档):
-  [待新鲜抓包验证后填写:vivo TWS 3e + Redmi K50 bt_config LE_KEY_PENC]
+  [已验证 2026-09-01] vivo TWS 3e + Redmi K50 实测(OTA MIC 验证 45 包/75 条 ATT
+  明文 SDU):bt_config.conf LE_KEY_PENC 的 LTK dump 序是 HCI 空口小端序,需要
+  **整体反转**才是 e() 可用的大端序 -- 引擎裁定 "reversed" 字节序。
+  交叉验证:同日手机 HCI snoop 的 LE_Start_Encryption 命令 LTK 字段与 bt_config
+  dump 序逐字节一致,rand/ediv=0 亦与空口 LL_ENC_REQ 相符 -- 两个独立通道同一定论。
+  即:bt_keys.py 返回的 ltk 原样喂本引擎即可(引擎自动双序尝试),但手工调用
+  bt_crypto.session_key 时必须先 bytes[::-1]。
 """
 
 import json
@@ -91,6 +97,11 @@ LL_ENC_REQ = 0x03
 LL_ENC_RSP = 0x04
 LL_START_ENC_REQ = 0x05
 LL_TERMINATE_IND = 0x02
+
+# 计数器回扫窗口:单板抓加密连接丢包重(空包心跳 ~40/s,信道跳变时成段丢),32 不够
+# 跨大缺口;离线解密不敏感延迟,放大到 2048(错配 MIC 假阳性 ~2048*2^-32/包,可忽略)。
+# 实测 vivo 重连会话:32 窗口 23 包 MIC 通过,2048 窗口 43+ 包。
+SEARCH_WINDOW = 2048
 
 LL_CONTROL_NAMES = {0x00: "CONNECTION_UPDATE", 0x01: "CHANNEL_MAP",
                     0x02: "TERMINATE", 0x03: "ENC_REQ", 0x04: "ENC_RSP",
@@ -171,7 +182,7 @@ class _ConnTrack:
         self.sessk = sessk
         self.iv = iv
         self.cipher = None if sessk is None else \
-            bt_crypto.LLCipherState(sessk, iv)
+            bt_crypto.LLCipherState(sessk, iv, search_window=SEARCH_WINDOW)
         self.rx = {bt_crypto.DIR_M2S: _L2capReassembly(),
                    bt_crypto.DIR_S2M: _L2capReassembly()}
         self.mic_ok = 0

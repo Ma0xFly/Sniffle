@@ -14,8 +14,9 @@ dump(实测核对):
 节名是远端地址的冒号 hex,实测存在正反两种线序(设备显示序与 dump 序),按目标
 MAC 双序匹配;不给 target_mac 时解析全部含 LE 密钥的节。
 
-LTK 字节序:bt_config dump 序 vs 空口/大端序,两个方向都作为候选交给
-pcap_decrypt 以 MIC 验证裁定(见 pcap_decrypt 模块尾"定案"注释)。
+LTK 字节序:bt_config dump 序(小端)与空口/大端序相反 -- 2026-09-01 vivo TWS 3e +
+Redmi K50 实测(MIC 验证 23+ 包):dump 序需整体反转才是 e() 可用大端序。两个方向
+都作为候选交给 pcap_decrypt 以 MIC 裁定(见 pcap_decrypt 模块尾"定案"注释)。
 
 JSON 形态(提取归档,如 logs/vivo_bond_keys.json):字段 ltk_hex/rand_hex/
 ediv_hex/irk_remote_hex/name,直接映射 BondKeys。

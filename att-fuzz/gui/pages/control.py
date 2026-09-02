@@ -164,12 +164,12 @@ def page():
 
         def _on_scan_select(e):
             sr = state.bt_scan_results
-            if not sr or e.value is None:
+            if not sr or not e.value:
                 return
-            idx = e.value
-            if not isinstance(idx, int) or idx >= len(sr.devices):
+            mac = str(e.value)
+            dev = next((d for d in sr.devices if d.mac == mac), None)
+            if dev is None:
                 return
-            dev = sr.devices[idx]
             tgt = {
                 "name": dev.name or "unknown",
                 "mac": dev.mac.upper(),
@@ -190,7 +190,7 @@ def page():
             sr = state.bt_scan_results
             if sr and len(scan_sel.options or []) != len(sr.devices):
                 opts = [{"label": "%s — %s" % (d.mac, d.name),
-                         "value": i} for i, d in enumerate(sr.devices)]
+                         "value": d.mac} for d in sr.devices]
                 scan_sel.set_options(opts)
 
         ui.timer(1.0, poll_scan)

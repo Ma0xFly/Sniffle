@@ -189,7 +189,7 @@ def page():
         def poll_scan():
             sr = state.bt_scan_results
             if sr and len(scan_sel.options or []) != len(sr.devices):
-                opts = [{"label": "%s (%s)" % (d.name, d.mac),
+                opts = [{"label": "%s — %s" % (d.mac, d.name),
                          "value": i} for i, d in enumerate(sr.devices)]
                 scan_sel.set_options(opts)
 

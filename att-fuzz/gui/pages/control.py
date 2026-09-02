@@ -143,50 +143,22 @@ def page():
             ui.button("载入", on_click=lambda: load_target()).props("flat dense")
             ui.button("删除", on_click=delete_target).props("flat dense color=negative")
             ui.button("保存档案", on_click=save_target).props("dense color=primary")
-
-    # ---------- 策略与参数 ----------
-    strat_card = ui.card().classes("w-full")
-    with strat_card:
-        ui.label("策略与参数").classes("text-sm font-semibold opacity-80")
-        strats = [str(p.relative_to(STRATEGIES_DIR)) for p in
-                  sorted(STRATEGIES_DIR.rglob("*.yaml"))] if STRATEGIES_DIR.exists() else []
-        if strats:
-            with ui.element('div').classes('flex flex-wrap gap-2 w-full'):
-                checks = {s: ui.checkbox(s, value=True).classes("text-xs")
-                          for s in strats}
-        else:
-            checks = {}
-            ui.label("strategies/ 下没有 yaml").classes("text-xs opacity-50")
-        with ui.row().classes("items-center gap-4 flex-wrap"):
-            seed = ui.number("seed", value=1, min=0, precision=0).classes("w-28")
-            maxc = ui.number("max-cases(0=全量)", value=0, min=0, precision=0).classes("w-40")
-            rounds_n = ui.number("rounds", value=0, min=0, precision=0).classes("w-28")
-            round_budget = ui.number("round-budget", value=100, min=1, precision=0).classes("w-32")
-
-    # ---------- 加密冒充参数(条件显示) ----------
-    imp_card = ui.card().classes("w-full")
-    with imp_card:
-        ui.label("加密冒充参数").classes("text-sm font-semibold opacity-80")
-        with ui.column().classes("gap-2 w-full"):
-            with ui.row().classes("items-center gap-2 w-full"):
-                imp_adb = ui.input("adb-serial(可选)",
-                                   placeholder="ZD9L8H454HDY7DEU") \
-                    .classes("w-56").props("dense outlined")
-                b_scan = ui.button("扫描手机", icon="phone_android",
-                                   on_click=lambda: _scan_btconfig()) \
-                    .props("dense color=primary")
-            imp_scan_sel = ui.select(
-                [], value=None,
-                label="扫描结果(选中后自动填档案)",
-                with_input=True).classes("w-full").props("dense outlined")
-            imp_duration = ui.number("imp-duration(秒,0=无限)", value=0, min=0,
-                                     precision=0).classes("w-40")
-            ui.label("bt_keys/keys_mac/phone_mac/wall_ledger/ltk 全从档案 JSON 读取,"
-                     "在上方编辑器填写或用扫描自动填充").classes("text-[10px] opacity-40")
+        ui.separator().classes("my-1")
+        ui.label("从手机扫描（需 root + USB 连接）").classes("text-xs opacity-60")
+        with ui.row().classes("items-center gap-2 w-full"):
+            scan_adb = ui.input("adb-serial", placeholder="手机序列号(可选)") \
+                .classes("w-56").props("dense outlined")
+            b_scan = ui.button("扫描手机", icon="phone_android",
+                               on_click=lambda: _scan_btconfig()) \
+                .props("dense color=primary")
+        scan_sel = ui.select(
+            [], value=None,
+            label="扫描结果(选中后自动填档案)",
+            with_input=True).classes("w-full").props("dense outlined")
 
         def _scan_btconfig():
             ok, why = controller.run_scan_btconfig(
-                adb_serial=imp_adb.value or None)
+                adb_serial=scan_adb.value or None)
             if not ok:
                 ui.notify(why, type="warning")
 
@@ -212,17 +184,45 @@ def page():
             editor.value = json.dumps(tgt, ensure_ascii=False, indent=2)
             ui.notify("已填充档案: %s" % dev.name, type="positive")
 
-        imp_scan_sel.on_value_change(_on_scan_select)
+        scan_sel.on_value_change(_on_scan_select)
 
         def poll_scan():
             sr = state.bt_scan_results
-            if sr and len(imp_scan_sel.options or []) != len(sr.devices):
+            if sr and len(scan_sel.options or []) != len(sr.devices):
                 opts = [{"label": "%s (%s)" % (d.name, d.mac),
                          "value": i} for i, d in enumerate(sr.devices)]
-                imp_scan_sel.set_options(opts)
+                scan_sel.set_options(opts)
 
         ui.timer(1.0, poll_scan)
 
+    # ---------- 策略与参数 ----------
+    strat_card = ui.card().classes("w-full")
+    with strat_card:
+        ui.label("策略与参数").classes("text-sm font-semibold opacity-80")
+        strats = [str(p.relative_to(STRATEGIES_DIR)) for p in
+                  sorted(STRATEGIES_DIR.rglob("*.yaml"))] if STRATEGIES_DIR.exists() else []
+        if strats:
+            with ui.element('div').classes('flex flex-wrap gap-2 w-full'):
+                checks = {s: ui.checkbox(s, value=True).classes("text-xs")
+                          for s in strats}
+        else:
+            checks = {}
+            ui.label("strategies/ 下没有 yaml").classes("text-xs opacity-50")
+        with ui.row().classes("items-center gap-4 flex-wrap"):
+            seed = ui.number("seed", value=1, min=0, precision=0).classes("w-28")
+            maxc = ui.number("max-cases(0=全量)", value=0, min=0, precision=0).classes("w-40")
+            rounds_n = ui.number("rounds", value=0, min=0, precision=0).classes("w-28")
+            round_budget = ui.number("round-budget", value=100, min=1, precision=0).classes("w-32")
+
+    # ---------- 加密冒充参数(条件显示) ----------
+    imp_card = ui.card().classes("w-full")
+    with imp_card:
+        ui.label("加密冒充参数").classes("text-sm font-semibold opacity-80")
+        with ui.column().classes("gap-2 w-full"):
+            imp_duration = ui.number("imp-duration(秒,0=无限)", value=0, min=0,
+                                     precision=0).classes("w-40")
+            ui.label("bt_keys/keys_mac/phone_mac/wall_ledger/ltk 全从档案 JSON 读取,"
+                     "用上方扫描手机按钮自动填充").classes("text-[10px] opacity-40")
     imp_card.set_visibility(False)
 
     # 初始载入档案

@@ -382,12 +382,21 @@ class FuzzController:
             from roles import impersonation_fuzz
             from core.monitor import ObservableLedger
             obs_ledger = ObservableLedger(od / "fuzz_ledger.jsonl")
-            obs_ledger.add_listener(bus.on_case)
 
             def on_transport(transport):
                 bus.attach_transport(transport)
                 self._transport = transport
                 self._start_snapshot(transport)
+                # transport 就绪 = 握手即将开始,切到 RUNNING(冒充角色
+                # 内部自管循环,不会调 begin_run,所以这里手动切)
+                state.begin_run(total=0)
+
+            # 包装 ledger listener:每条 case 同时推进进度计数
+            def _on_case_with_progress(result, case, replayable):
+                bus.on_case(result, case, replayable)
+                state.inc_done(case_id=result.case_id)
+
+            obs_ledger.add_listener(_on_case_with_progress)
 
             impersonation_fuzz.run(
                 target, od, serport=serport,
@@ -413,12 +422,18 @@ class FuzzController:
             from roles import server_fuzz
             from core.monitor import ObservableLedger
             obs_ledger = ObservableLedger(od / "server_ledger.jsonl")
-            obs_ledger.add_listener(bus.on_case)
 
             def on_transport(transport):
                 bus.attach_transport(transport)
                 self._transport = transport
                 self._start_snapshot(transport)
+                state.begin_run(total=0)
+
+            def _on_case_with_progress(result, case, replayable):
+                bus.on_case(result, case, replayable)
+                state.inc_done(case_id=result.case_id)
+
+            obs_ledger.add_listener(_on_case_with_progress)
 
             server_fuzz.run(
                 target, od, serport=serport, duration=duration,

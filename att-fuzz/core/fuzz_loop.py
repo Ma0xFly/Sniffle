@@ -174,6 +174,22 @@ def run_corpus_loop(session, strategy_paths, ledger, gatt, transport,
         for cls, n in sorted(stats.items()):
             log.info("  %-20s %d", cls, n)
         log.info("ledger: %s", ledger.path)
+        # 提取告警用例到单独文件,方便快速查找
+        import json as _json
+        alerts_path = Path(ledger.path).parent / (Path(ledger.path).stem + "_alerts.jsonl")
+        alert_cls = {c.name for c in ALERT_CLASSIFICATIONS}
+        alert_count = 0
+        with alerts_path.open("w", encoding="utf-8") as af:
+            with Path(ledger.path).open("r", encoding="utf-8") as lf:
+                for line in lf:
+                    try:
+                        rec = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    if rec.get("classification") in alert_cls:
+                        af.write(line)
+                        alert_count += 1
+        log.info("alerts: %s (%d 条)", alerts_path, alert_count)
     return {"done": done, "alerts": alerts, "stats": stats}
 
 

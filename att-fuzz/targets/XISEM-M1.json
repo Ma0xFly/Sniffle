@@ -1,0 +1,11 @@
+{
+  "name": "XISEM-M1",
+  "mac": "F0:9A:DD:CE:2C:5A",
+  "mac_random": 1,
+  "phone_mac": "00:C3:0A:02:6C:24",
+  "ltk": "8fea19bf82c5462e65deb5c5fd7320b0",
+  "conn_interval": 12,
+  "latency": 0,
+  "connect_timeout": 10,
+  "pairing": "none"
+}

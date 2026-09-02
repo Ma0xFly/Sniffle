@@ -1,0 +1,11 @@
+{
+  "name": "vivo TWS 3e",
+  "mac": "64:44:7B:EE:41:F4",
+  "mac_random": 0,
+  "phone_mac": "00:C3:0A:02:6C:24",
+  "ltk": "7960673d176b6ac0c2acf647ff359368",
+  "conn_interval": 12,
+  "latency": 0,
+  "connect_timeout": 10,
+  "pairing": "none"
+}

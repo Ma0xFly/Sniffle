@@ -336,11 +336,12 @@ def page():
                 ui.notify(err, type="negative")
                 return
             bt_keys = tgt.get("bt_keys")
+            has_ltk = bool(tgt.get("ltk"))
             keys_mac = tgt.get("keys_mac") or tgt.get("mac")
             phone_mac = tgt.get("phone_mac")
-            if not bt_keys:
-                ui.notify("档案缺少 bt_keys:请在 targets/bt_keys/ 放密钥文件"
-                          "并在 JSON 填 bt_keys 字段", type="warning")
+            if not bt_keys and not has_ltk:
+                ui.notify("档案缺少密钥:请在 JSON 填 bt_keys 路径或 ltk 字段"
+                          "(可用扫描手机自动填充)", type="warning")
                 return
             if not phone_mac:
                 ui.notify("档案缺少 phone_mac(手机 public MAC)", type="warning")

@@ -168,10 +168,61 @@ def page():
     with imp_card:
         ui.label("加密冒充参数").classes("text-sm font-semibold opacity-80")
         with ui.column().classes("gap-2 w-full"):
+            with ui.row().classes("items-center gap-2 w-full"):
+                imp_adb = ui.input("adb-serial(可选)",
+                                   placeholder="ZD9L8H454HDY7DEU") \
+                    .classes("w-56").props("dense outlined")
+                b_scan = ui.button("扫描手机", icon="phone_android",
+                                   on_click=lambda: _scan_btconfig()) \
+                    .props("dense color=primary")
+            imp_scan_sel = ui.select(
+                [], value=None,
+                label="扫描结果(选中后自动填档案)",
+                with_input=True).classes("w-full").props("dense outlined")
             imp_duration = ui.number("imp-duration(秒,0=无限)", value=0, min=0,
                                      precision=0).classes("w-40")
-            ui.label("bt_keys/keys_mac/phone_mac/wall_ledger 全从档案 JSON 读取,"
-                     "在上方编辑器填写").classes("text-[10px] opacity-40")
+            ui.label("bt_keys/keys_mac/phone_mac/wall_ledger/ltk 全从档案 JSON 读取,"
+                     "在上方编辑器填写或用扫描自动填充").classes("text-[10px] opacity-40")
+
+        def _scan_btconfig():
+            ok, why = controller.run_scan_btconfig(
+                adb_serial=imp_adb.value or None)
+            if not ok:
+                ui.notify(why, type="warning")
+
+        def _on_scan_select(e):
+            sr = state.bt_scan_results
+            if not sr or e.value is None:
+                return
+            idx = e.value
+            if not isinstance(idx, int) or idx >= len(sr.devices):
+                return
+            dev = sr.devices[idx]
+            tgt = {
+                "name": dev.name or "unknown",
+                "mac": dev.mac.upper(),
+                "mac_random": dev.addr_type,
+                "phone_mac": sr.phone_mac.upper(),
+                "ltk": dev.ltk_hex,
+                "conn_interval": 12,
+                "latency": 0,
+                "connect_timeout": 10,
+                "pairing": "none",
+            }
+            editor.value = json.dumps(tgt, ensure_ascii=False, indent=2)
+            ui.notify("已填充档案: %s" % dev.name, type="positive")
+
+        imp_scan_sel.on_value_change(_on_scan_select)
+
+        def poll_scan():
+            sr = state.bt_scan_results
+            if sr and len(imp_scan_sel.options or []) != len(sr.devices):
+                opts = [{"label": "%s (%s)" % (d.name, d.mac),
+                         "value": i} for i, d in enumerate(sr.devices)]
+                imp_scan_sel.set_options(opts)
+
+        ui.timer(1.0, poll_scan)
+
     imp_card.set_visibility(False)
 
     # 初始载入档案

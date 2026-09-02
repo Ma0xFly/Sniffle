@@ -114,6 +114,7 @@ class RunState:
         self.gatt = None             # discover/fuzz 后的 GattMap 快照(dict)
         self.probe_result = None     # probe() 返回 dict
         self.replay_result = None    # 最近一次 replay 的用例行
+        self.bt_scan_results = None  # bt_config 扫描结果(ScanResult)
 
         # 控制标志(控制器线程读)
         self.pause_requested = threading.Event()
@@ -142,6 +143,7 @@ class RunState:
             self.gatt = None
             self.probe_result = None
             self.replay_result = None
+            self.bt_scan_results = None
             self.pause_requested.clear()
             self.stop_requested.clear()
             self.conn = {"link_up": False, "cur_event": 0, "att_mtu": 23,

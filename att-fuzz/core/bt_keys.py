@@ -148,6 +148,28 @@ def parse_bt_config(path: str | Path, target_mac: str | None = None) -> list:
     return out
 
 
+def parse_bt_config_all(path: str | Path) -> list:
+    """解析 bt_config.conf 返回全部含 LE 密钥的 bond 节（不过滤）。"""
+    return parse_bt_config(path, target_mac=None)
+
+
+def extract_phone_mac(path: str | Path) -> str | None:
+    """从 bt_config.conf 的 [Adapter] 节取 Address 字段（手机自身 MAC，书写序小写）。
+    bt_config.conf 里 [Adapter] 节含 Address=xx:xx:xx:xx:xx:xx 形式的本机地址。"""
+    in_adapter = False
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_adapter = line[1:-1].strip().lower() == "adapter"
+            continue
+        if not in_adapter or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip().upper() == "ADDRESS":
+            return v.strip().lower()
+    return None
+
+
 def _from_bt_config_section(source: str, sec: str, kv: dict,
                             sec_mac: bytes | None) -> BondKeys:
     bk = BondKeys(source=source, section=sec, addr=sec_mac)

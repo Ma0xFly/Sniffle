@@ -281,6 +281,17 @@ def page():
                 .props("flat")
             b_stop = ui.button("停止", icon="stop", on_click=controller.stop) \
                 .props("flat color=negative")
+        with ui.row().classes("items-center gap-2 w-full"):
+            replay_pdu = ui.input("重放 PDU(hex)",
+                                  placeholder="0a0000",
+                                  with_input=True).classes("w-40").props("dense outlined")
+            b_replay = ui.button("重放", icon="replay",
+                                 on_click=lambda: _replay()).props("flat dense")
+            replay_case = ui.input("按 case_id 重放",
+                                   placeholder="cc-write-nonotify-0100@003c",
+                                   with_input=True).classes("w-56").props("dense outlined")
+            b_replay_case = ui.button("从台账重放", icon="history",
+                                      on_click=lambda: _replay_case()).props("flat dense")
         progress = ui.linear_progress(value=0).classes("w-full")
         stat_line = ui.label("").classes("text-xs opacity-80")
         current_line = ui.label("").classes("text-xs opacity-60")
@@ -380,6 +391,47 @@ def page():
                 _impersonate()
             elif m == "server":
                 _server()
+
+        def _replay():
+            tgt, err = _cur_target()
+            if err:
+                ui.notify(err, type="negative")
+                return
+            pdu = (replay_pdu.value or "").strip()
+            if not pdu:
+                ui.notify("填入 PDU hex(如 0a0000)", type="warning")
+                return
+            ok, why = controller.run_replay(pdu, tgt, times=1,
+                                            serport=ser.value or None, demo=_demo())
+            if not ok:
+                ui.notify(why, type="warning")
+
+        def _replay_case():
+            tgt, err = _cur_target()
+            if err:
+                ui.notify(err, type="negative")
+                return
+            cid = (replay_case.value or "").strip()
+            if not cid:
+                ui.notify("填入 case_id(如 cc-write-0100@003c)", type="warning")
+                return
+            from ..util import find_ledger, run_dirs
+            ledger_path = None
+            # 优先当前 run,其次最新 run
+            if state.outdir:
+                ledger_path = find_ledger(state.outdir)
+            if not ledger_path:
+                dirs = run_dirs()
+                if dirs:
+                    ledger_path = find_ledger(dirs[0])
+            if not ledger_path:
+                ui.notify("找不到台账文件", type="warning")
+                return
+            ok, why = controller.replay_from_ledger(cid, str(ledger_path), tgt,
+                                                    times=1, serport=ser.value or None,
+                                                    demo=_demo())
+            if not ok:
+                ui.notify(why, type="warning")
 
         def poll_run():
             p = state.progress()

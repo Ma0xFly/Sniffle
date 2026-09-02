@@ -41,10 +41,10 @@ def layout(title: str):
     ui.timer(0.6, poll_header)
 
     with ui.left_drawer(bordered=True).classes("bg-slate-900 max-w-[220px]"):
-        ui.label("控制台").classes("text-xs uppercase opacity-50 px-2")
+        ui.label("导航").classes("text-xs uppercase opacity-50 px-2")
         for path, icon, name in [
                 ("/", "tune", "控制台"),
-                ("/dashboard", "monitor_heart", "实时仪表盘"),
+                ("/dashboard", "monitor_heart", "仪表盘"),
                 ("/results", "table_view", "结果与重放"),
                 ("/history", "history", "历史会话"),
         ]:

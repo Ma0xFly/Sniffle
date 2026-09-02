@@ -283,13 +283,11 @@ def page():
                 .props("flat color=negative")
         with ui.row().classes("items-center gap-2 w-full"):
             replay_pdu = ui.input("重放 PDU(hex)",
-                                  placeholder="0a0000",
-                                  with_input=True).classes("w-40").props("dense outlined")
+                                  placeholder="0a0000").classes("w-40").props("dense outlined")
             b_replay = ui.button("重放", icon="replay",
                                  on_click=lambda: _replay()).props("flat dense")
             replay_case = ui.input("按 case_id 重放",
-                                   placeholder="cc-write-nonotify-0100@003c",
-                                   with_input=True).classes("w-56").props("dense outlined")
+                                   placeholder="cc-write-nonotify-0100@003c").classes("w-56").props("dense outlined")
             b_replay_case = ui.button("从台账重放", icon="history",
                                       on_click=lambda: _replay_case()).props("flat dense")
         progress = ui.linear_progress(value=0).classes("w-full")

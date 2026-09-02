@@ -1156,3 +1156,44 @@ assert _fs_g.ensure_calls == 0, _fs_g.ensure_calls
 assert _stg["done"] == 2
 print("no_mtu_negotiate_meta=False 不切协商态自测通过")
 print("run_corpus_loop 全部自测通过")
+
+# ---- GUI 工具函数:find_ledger / run_stats 多台账支持 ----
+import json as _json_gui
+_gui_dir = Path(tempfile.mkdtemp())
+# 写 fuzz_ledger.jsonl(无 ledger.jsonl -> find_ledger 应返回 fuzz_ledger)
+with (_gui_dir / "fuzz_ledger.jsonl").open("w") as _fh:
+    _fh.write(_json_gui.dumps({"case_id": "t1", "classification": "OK_RESPONSE"}) + "\n")
+    _fh.write(_json_gui.dumps({"case_id": "t2", "classification": "ERROR_RESPONSE"}) + "\n")
+# 写 gatt_enc.json(加密冒充产物)
+(_gui_dir / "gatt_enc.json").write_text(_json_gui.dumps(
+    {"services": [{"start": 1, "end": 9, "uuid": "1800"}],
+     "characteristics": [{"decl": 2, "value": 3, "props": 2, "uuid": "2A00",
+                           "cccd_handle": None}]}))
+
+# 导入 GUI util(需要 sys.path 有 att-fuzz)
+sys.path.insert(0, str(REPO / "att-fuzz"))
+from gui.util import find_ledger, run_stats  # noqa: E402
+_fl = find_ledger(_gui_dir)
+assert _fl is not None and _fl.name == "fuzz_ledger.jsonl", _fl
+_st = run_stats(_gui_dir)
+assert _st["cases"] == 2, _st
+assert _st["gatt_str"].startswith("1服务"), _st
+assert _st["alerts"] == 0, _st
+
+# 只写 impersonation_ledger.jsonl(无 ledger/fuzz_ledger -> find_ledger 应返回它)
+_imp_dir = Path(tempfile.mkdtemp())
+with (_imp_dir / "impersonation_ledger.jsonl").open("w") as _fh:
+    _fh.write(_json_gui.dumps({"kind": "bond_loaded"}) + "\n")
+    _fh.write(_json_gui.dumps({"kind": "enc_engaged"}) + "\n")
+_fl2 = find_ledger(_imp_dir)
+assert _fl2 is not None and _fl2.name == "impersonation_ledger.jsonl", _fl2
+_st2 = run_stats(_imp_dir)
+assert _st2["cases"] == 2, _st2
+
+# 空目录:find_ledger 返回 None
+_empty_dir = Path(tempfile.mkdtemp())
+assert find_ledger(_empty_dir) is None
+_st3 = run_stats(_empty_dir)
+assert _st3["cases"] == 0, _st3
+
+print("GUI find_ledger / run_stats 多台账自测通过")

@@ -63,13 +63,16 @@ def run(target: dict, outdir: Path, serport=None,
         phone_mac: str | None = None, duration: float = 0.0,
         max_cases: int = 0, adb_serial: str | None = None,
         strategy_paths=None, seed: int = 1, rounds: int = 0,
-        round_budget: int = 100, wall_ledger=None) -> int:
+        round_budget: int = 100, wall_ledger=None,
+        on_transport=None, ledger=None) -> int:
     """加密冒充主入口。duration>0 为运行秒数上限;0 表示一直跑到 Ctrl-C。
     bt_keys_path:Android bt_config.conf 或提取 JSON。
     keys_mac:bt_config 里目标设备(耳机)MAC(书写序)。
     phone_mac:手机 public MAC(书写序) -- 我们冒充这个地址。
     strategy_paths:认证面语料(策略目录/文件);None=不跑语料循环(只做墙验证读)。
     wall_ledger:阶段一台账路径(Path/str),供 0x05 墙 handle 加载;None=跳过墙验证。
+    on_transport:transport 创建后回调(GUI 事件桥用);None=不回调(CLI 不传)。
+    ledger:外部 ObservableLedger(GUI 实时刷新用);None=角色自建 Ledger。
     返回 0=正常结束,非 0=出错。"""
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -77,14 +80,16 @@ def run(target: dict, outdir: Path, serport=None,
         return _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
                            phone_mac, duration, max_cases, adb_serial,
                            strategy_paths, seed, rounds, round_budget,
-                           wall_ledger)
+                           wall_ledger, on_transport, ledger)
 
 
 def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
                 phone_mac, duration, max_cases, adb_serial,
                 strategy_paths, seed, rounds, round_budget,
-                wall_ledger) -> int:
+                wall_ledger, on_transport=None, ledger=None) -> int:
     transport = make_transport(serport, target, outdir)
+    if on_transport is not None:
+        on_transport(transport)
     ledger_path = outdir / "impersonation_ledger.jsonl"
     started = time.time()
     conn_no = 0
@@ -132,7 +137,7 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
                 _do_one_connection(transport, target, ltk_wire, outdir,
                                    phone_wire, record, duration, started,
                                    strategy_paths, seed, max_cases, rounds,
-                                   round_budget, wall_ledger)
+                                   round_budget, wall_ledger, ledger)
             except LinkDrop as drop:
                 log.warning("link dropped: %s", drop)
                 record(kind="link_drop", source=drop.source,
@@ -163,7 +168,7 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
 def _do_one_connection(transport, target, ltk_wire, outdir, phone_wire,
                         record, duration, started,
                         strategy_paths, seed, max_cases, rounds,
-                        round_budget, wall_ledger):
+                        round_budget, wall_ledger, ext_ledger=None):
     """单次冒充连接:握手+发现(_handshake_and_setup)-> 加密 GATT(墙验证+语料)。"""
     gatt = _handshake_and_setup(transport, target, ltk_wire, phone_wire, record,
                                outdir=outdir)
@@ -172,7 +177,8 @@ def _do_one_connection(transport, target, ltk_wire, outdir, phone_wire,
 
     _do_encrypted_gatt(transport, target, outdir, record, duration, started,
                        gatt, strategy_paths, seed, max_cases, rounds,
-                       round_budget, wall_ledger, ltk_wire, phone_wire)
+                       round_budget, wall_ledger, ltk_wire, phone_wire,
+                       ext_ledger)
 
     # 正常断链
     if transport.link_up:
@@ -347,7 +353,8 @@ def _wait_handshake_pdu(transport, opcode, timeout):
 
 def _do_encrypted_gatt(transport, target, outdir, record, duration, started,
                        gatt, strategy_paths, seed, max_cases, rounds,
-                       round_budget, wall_ledger, ltk_wire, phone_wire):
+                       round_budget, wall_ledger, ltk_wire, phone_wire,
+                       ext_ledger=None):
     """加密链路上:0x05 墙验证读 + 认证面语料循环。
     gatt:已在 _handshake_and_setup 发现的加密 GATT 地图(复用,不重发现)。
     wall_ledger:阶段一台账路径(Path/str/None);None=跳过 0x05 墙验证。
@@ -410,8 +417,10 @@ def _do_encrypted_gatt(transport, target, outdir, record, duration, started,
     from core.fuzz_loop import run_corpus_loop
     from core.monitor import Ledger
 
+    fuzz_ledger = ext_ledger if ext_ledger is not None else \
+        Ledger(str(outdir / "fuzz_ledger.jsonl"))
     fuzz_session = FuzzSession(transport, target, gatt_map_path=None,
-                               ledger=Ledger(str(outdir / "fuzz_ledger.jsonl")),
+                               ledger=fuzz_ledger,
                                negotiate_mtu=False)
     fuzz_session.gatt = gatt   # 已发现的加密 GATT 地图,跳过重发现
 
@@ -438,7 +447,7 @@ def _do_encrypted_gatt(transport, target, outdir, record, duration, started,
             fuzz_session.gatt = gatt
         return ok
 
-    stats = run_corpus_loop(fuzz_session, strategy_paths, fuzz_session.ledger,
+    stats = run_corpus_loop(fuzz_session, strategy_paths, fuzz_ledger,
                             gatt, transport, seed=seed, max_cases=max_cases,
                             rounds=rounds, round_budget=round_budget,
                             on_freeze=_on_freeze, on_link_drop=_on_link_drop,

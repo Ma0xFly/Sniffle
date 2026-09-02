@@ -51,6 +51,10 @@ RUNNING = "running"
 PAUSED = "paused"
 STOPPING = "stopping"
 
+# 运行模式(与 controller.MODE_TEXT 对应)
+IMPERSONATE = "impersonate"
+SERVER = "server"
+
 STATUS_TEXT = {
     IDLE: "空闲", CONNECTING: "连接中", RUNNING: "运行中",
     PAUSED: "已暂停", STOPPING: "停止中",
@@ -86,6 +90,7 @@ class RunState:
             "link_up": False, "cur_event": 0, "att_mtu": 23, "ll_max": 27,
             "tx_queue_full": False, "reconnects": 0, "fw_version": None,
             "serial": "空闲",
+            "encrypted": False, "session_key": None, "att_freeze_count": 0,
         }
 
         # ---- fuzz 进度 ----
@@ -141,7 +146,9 @@ class RunState:
             self.stop_requested.clear()
             self.conn = {"link_up": False, "cur_event": 0, "att_mtu": 23,
                          "ll_max": 27, "tx_queue_full": False, "reconnects": 0,
-                         "fw_version": None, "serial": "空闲"}
+                         "fw_version": None, "serial": "空闲",
+                         "encrypted": False, "session_key": None,
+                         "att_freeze_count": 0}
 
     def set_status(self, status):
         with self.lock:
@@ -183,6 +190,10 @@ class RunState:
             conn = self.conn
             if kind == "connected":
                 conn["link_up"] = True
+            elif kind == "enc_engaged":
+                conn["encrypted"] = True
+            elif kind == "conn_start":
+                conn["encrypted"] = False
             elif kind in ("state", "terminate", "expected_disconnect"):
                 if kind == "terminate":
                     conn["link_up"] = False
@@ -206,6 +217,8 @@ class RunState:
             if meta and meta[2]:
                 self.alerts_total += 1
                 self.alerts.append(row)
+                if cls == "ATT_FREEZE":
+                    self.conn["att_freeze_count"] += 1
 
     def inc_done(self, case_id=None):
         with self.lock:

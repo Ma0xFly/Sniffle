@@ -140,31 +140,92 @@ def page():
         load_target(sel.value)
 
     # ---------- 策略与参数 ----------
-    with ui.card().classes("w-full"):
+    strat_card = ui.card().classes("w-full")
+    with strat_card:
         ui.label("策略与参数").classes("text-sm font-semibold opacity-80")
         strats = [str(p.relative_to(STRATEGIES_DIR)) for p in
                   sorted(STRATEGIES_DIR.rglob("*.yaml"))] if STRATEGIES_DIR.exists() else []
-        checks = {s: ui.checkbox(s, value=True).classes("text-xs")
-                  for s in strats} if strats else {}
-        if not strats:
+        if strats:
+            with ui.element('div').classes('flex flex-wrap gap-2 w-full'):
+                checks = {s: ui.checkbox(s, value=True).classes("text-xs")
+                          for s in strats}
+        else:
+            checks = {}
             ui.label("strategies/ 下没有 yaml").classes("text-xs opacity-50")
-        with ui.row().classes("items-center gap-6"):
-            seed = ui.number("seed", value=1, min=0, precision=0).classes("w-32")
-            maxc = ui.number("max-cases(0=全量)", value=0, min=0, precision=0).classes("w-48")
+        with ui.row().classes("items-center gap-4 flex-wrap"):
+            seed = ui.number("seed", value=1, min=0, precision=0).classes("w-28")
+            maxc = ui.number("max-cases(0=全量)", value=0, min=0, precision=0).classes("w-40")
+            rounds_n = ui.number("rounds", value=0, min=0, precision=0).classes("w-28")
+            round_budget = ui.number("round-budget", value=100, min=1, precision=0).classes("w-32")
+
+    # ---------- 加密冒充参数(条件显示) ----------
+    imp_card = ui.card().classes("w-full")
+    with imp_card:
+        ui.label("加密冒充参数").classes("text-sm font-semibold opacity-80")
+        with ui.column().classes("gap-2 w-full"):
+            imp_btkeys = ui.input("bt-keys 路径(bt_config.conf 或 JSON)",
+                                  placeholder="att-fuzz/logs/vivo_bond_keys.json") \
+                .classes("w-full").props("dense outlined")
+            with ui.row().classes("gap-4 flex-wrap"):
+                imp_keys_mac = ui.input("keys-mac(耳机 MAC,书写序)",
+                                        placeholder="64:44:7B:EE:41:F4") \
+                    .classes("w-48").props("dense outlined")
+                imp_phone_mac = ui.input("phone-mac(手机 MAC,书写序)",
+                                         placeholder="00:C3:0A:02:6C:24") \
+                    .classes("w-48").props("dense outlined")
+            imp_wall = ui.input("wall-ledger(可选,阶段一台账)",
+                                placeholder="att-fuzz/logs/run-xxx/ledger.jsonl") \
+                .classes("w-full").props("dense outlined")
+            imp_duration = ui.number("imp-duration(秒,0=无限)", value=0, min=0,
+                                     precision=0).classes("w-40")
+    imp_card.set_visibility(False)
+
+    # ---------- 反向角色参数(条件显示) ----------
+    srv_card = ui.card().classes("w-full")
+    with srv_card:
+        ui.label("反向角色参数").classes("text-sm font-semibold opacity-80")
+        with ui.column().classes("gap-2 w-full"):
+            srv_name = ui.input("server-name", value="Sniffle Server") \
+                .classes("w-full").props("dense outlined")
+            with ui.row().classes("gap-4 flex-wrap"):
+                srv_duration = ui.number("server-duration(秒,0=无限)", value=0,
+                                         min=0, precision=0).classes("w-40")
+                srv_adb = ui.input("adb-serial(可选)", placeholder="ZD9L8H454HDY7DEU") \
+                    .classes("w-56").props("dense outlined")
+    srv_card.set_visibility(False)
 
     # ---------- 运行控制 ----------
     with ui.card().classes("w-full"):
         ui.label("运行控制").classes("text-sm font-semibold opacity-80")
-        b_probe = ui.button("探测广播", icon="radar", on_click=lambda: _probe())
-        b_disc = ui.button("仅发现 GATT", icon="travel_explore", on_click=lambda: _discover())
-        b_run = ui.button("开始 Fuzz", icon="play_arrow", on_click=lambda: _fuzz()) \
-            .props("color=primary")
-        b_pause = ui.button("暂停", icon="pause", on_click=controller.pause) \
-            .props("flat")
-        b_resume = ui.button("继续", icon="play_circle", on_click=controller.resume) \
-            .props("flat")
-        b_stop = ui.button("停止", icon="stop", on_click=controller.stop) \
-            .props("flat color=negative")
+        mode_sel = ui.toggle(
+            {"central": "直连 Fuzz", "impersonate": "加密冒充",
+             "server": "反向角色"},
+            value="central").classes("text-xs")
+
+        def _on_mode_change(e):
+            m = e.value or "central"
+            imp_card.set_visibility(m == "impersonate")
+            srv_card.set_visibility(m == "server")
+            # 策略+参数卡在 server 模式隐藏(server 无语料)
+            strat_card.set_visibility(m != "server")
+            # 按钮标签
+            b_run.set_text({"central": "开始 Fuzz",
+                            "impersonate": "开始冒充",
+                            "server": "开始广播"}[m])
+
+        mode_sel.on_value_change(_on_mode_change)
+
+        with ui.row().classes("items-center gap-2"):
+            b_probe = ui.button("探测广播", icon="radar", on_click=lambda: _probe())
+            b_disc = ui.button("仅发现 GATT", icon="travel_explore", on_click=lambda: _discover())
+            b_run = ui.button("开始 Fuzz", icon="play_arrow", on_click=lambda: _start()) \
+                .props("color=primary")
+            b_pause = ui.button("暂停", icon="pause", on_click=controller.pause) \
+                .props("flat")
+            b_resume = ui.button("继续", icon="play_circle", on_click=controller.resume) \
+                .props("flat")
+            b_stop = ui.button("停止", icon="stop", on_click=controller.stop) \
+                .props("flat color=negative")
         progress = ui.linear_progress(value=0).classes("w-full")
         stat_line = ui.label("").classes("text-xs opacity-80")
         current_line = ui.label("").classes("text-xs opacity-60")
@@ -213,6 +274,52 @@ def page():
                                           serport=ser.value or None, demo=_demo())
             if not ok:
                 ui.notify(why, type="warning")
+
+        def _impersonate():
+            tgt, err = _cur_target()
+            if err:
+                ui.notify(err, type="negative")
+                return
+            if not imp_btkeys.value:
+                ui.notify("加密冒充需要 bt-keys 路径", type="warning")
+                return
+            if not imp_phone_mac.value:
+                ui.notify("加密冒充需要 phone-mac(手机地址)", type="warning")
+                return
+            paths = _strategy_paths() or None
+            ok, why = controller.run_impersonation(
+                tgt, bt_keys_path=imp_btkeys.value,
+                keys_mac=imp_keys_mac.value or None,
+                phone_mac=imp_phone_mac.value,
+                strategy_paths=paths, seed=int(seed.value or 1),
+                max_cases=int(maxc.value or 0),
+                rounds=int(rounds_n.value or 0),
+                round_budget=int(round_budget.value or 100),
+                wall_ledger=imp_wall.value or None,
+                duration=float(imp_duration.value or 0),
+                serport=ser.value or None, demo=_demo())
+            if not ok:
+                ui.notify(why, type="warning")
+
+        def _server():
+            tgt, _ = _cur_target()
+            ok, why = controller.run_server(
+                tgt or {}, name=srv_name.value or "Sniffle Server",
+                duration=float(srv_duration.value or 0),
+                interval_ms=200,
+                adb_serial=srv_adb.value or None,
+                serport=ser.value or None, demo=_demo())
+            if not ok:
+                ui.notify(why, type="warning")
+
+        def _start():
+            m = mode_sel.value or "central"
+            if m == "central":
+                _fuzz()
+            elif m == "impersonate":
+                _impersonate()
+            elif m == "server":
+                _server()
 
         def poll_run():
             p = state.progress()

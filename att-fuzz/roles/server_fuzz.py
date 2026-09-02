@@ -77,15 +77,19 @@ def make_transport(serport, outdir: Path, conn_interval: int = 12) -> SniffleTra
 
 def run(target: dict | None, outdir: Path, serport=None, duration: float = 0.0,
         name: str = "Sniffle Server", interval_ms: int = 200,
-        adb_serial: str | None = None, adb_path: str | None = None) -> int:
-    """反向角色主入口。duration>0 为运行秒数上限;0 表示一直跑到 Ctrl-C。"""
+        adb_serial: str | None = None, adb_path: str | None = None,
+        on_transport=None, ledger=None) -> int:
+    """反向角色主入口。duration>0 为运行秒数上限;0 表示一直跑到 Ctrl-C。
+    on_transport:transport 创建后回调(GUI 事件桥用);None=不回调(CLI 不传)。
+    ledger:外部 ObservableLedger(GUI 实时刷新用);None=角色自建 Ledger。"""
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     conn_interval = (target or {}).get("conn_interval", 12)
     serport = serport or (target or {}).get("serport")
     with serial_guard(serport, "CLI server_fuzz(反向角色)"):
         return _run_locked(outdir, serport, duration, name, interval_ms,
-                           conn_interval, adb_serial, adb_path)
+                           conn_interval, adb_serial, adb_path,
+                           on_transport, ledger)
 
 
 def _drain_oracle(record, oracle):
@@ -98,8 +102,11 @@ def _drain_oracle(record, oracle):
 
 def _run_locked(outdir: Path, serport, duration: float, name: str,
                 interval_ms: int, conn_interval: int,
-                adb_serial: str | None, adb_path: str | None) -> int:
+                adb_serial: str | None, adb_path: str | None,
+                on_transport=None, ext_ledger=None) -> int:
     t = make_transport(serport, outdir, conn_interval)
+    if on_transport is not None:
+        on_transport(t)
     responder = ServerResponder(build_db(device_name=name), server_mtu=247)
     oracle = AdbOracle(serial=adb_serial or "ZD9L8H454HDY7DEU",
                        adb_path=adb_path, outdir=outdir)

@@ -61,4 +61,5 @@ def layout(title: str):
                 "text-[10px] opacity-40 px-2 mt-auto")
 
 
-MODE_NAME = {"probe": "广播探测", "discover": "GATT 发现", "fuzz": "Fuzz", "replay": "重放"}
+MODE_NAME = {"probe": "广播探测", "discover": "GATT 发现", "fuzz": "Fuzz",
+             "replay": "重放", "impersonate": "加密冒充", "server": "反向角色"}

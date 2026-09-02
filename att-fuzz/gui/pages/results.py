@@ -9,8 +9,8 @@ from nicegui import ui
 from ..controller import controller
 from ..state import state
 from ..theme import layout
-from ..util import (RESULT_COLUMNS, CLASS_BADGE, build_summary_md, load_ledger,
-                    row_to_ui, run_dirs)
+from ..util import (RESULT_COLUMNS, CLASS_BADGE, build_summary_md, find_ledger,
+                    load_ledger, row_to_ui, run_dirs)
 
 
 def page():
@@ -100,6 +100,17 @@ def page():
         detail["row"] = row
         rec = row.get("_raw", {})
         d_title.set_text("用例 %s [%s]" % (row["case_id"], row["classification"]))
+        # replay 仅对直连 fuzz 台账(ledger.jsonl)有效;加密冒充/反向角色
+        # 台账的 PDU 需加密链路或双向角色,通用 replay 不支持。
+        replay_ok = source["kind"] == "live" or \
+            (source["kind"] == "file" and
+             (match := next((x for x in run_dirs() if x.name == run_sel.value), None))
+             and (match / "ledger.jsonl").exists())
+        b_replay1.disable() if not replay_ok else b_replay1.enable()
+        b_replay5.disable() if not replay_ok else b_replay5.enable()
+        if not replay_ok:
+            b_replay1.tooltip("加密冒充/反向角色台账不支持通用重放")
+            b_replay5.tooltip("加密冒充/反向角色台账不支持通用重放")
         d_grid.clear()
         with d_grid:
             base = rec.get("case") or {}
@@ -156,7 +167,8 @@ def page():
         else:
             d = run_dirs()
             match = next((x for x in d if x.name == run_sel.value), None)
-            recs_all = load_ledger(match / "ledger.jsonl") if match else []
+            ledger_path = find_ledger(match) if match else None
+            recs_all = load_ledger(ledger_path) if ledger_path else []
         cls = cls_sel.value
         layer = (layer_in.value or "").strip().lower()
         text = (text_in.value or "").strip().lower()

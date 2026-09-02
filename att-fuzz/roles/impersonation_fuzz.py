@@ -103,7 +103,8 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
     # ---- 1. 加载 bond 密钥 ----
     if not bt_keys_path:
         raise ImpersonationError("需要 --bt-keys 指定密钥文件(bt_config.conf 或 JSON)")
-    bonds = bt_keys.load_keys(bt_keys_path, target_mac=keys_mac)
+    bonds = bt_keys.load_keys(bt_keys.resolve_path(bt_keys_path),
+                              target_mac=keys_mac)
     if not bonds:
         raise ImpersonationError("密钥文件里没有可用 bond(目标节未匹配?试试 --keys-mac)")
     # 取第一个有 LTK 的 bond

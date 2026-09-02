@@ -207,9 +207,10 @@ def _decrypt_cli(args, outdir) -> int:
             raise SystemExit("error: --ltk 需 16 字节(32 hex 字符)")
         candidates.append((k, "cli-ltk"))
     if args.bt_keys:
-        if not Path(args.bt_keys).is_file():
-            raise SystemExit("error: 密钥文件不存在: %s" % args.bt_keys)
-        bonds = bt_keys.load_keys(args.bt_keys, target_mac=args.keys_mac)
+        _bk_path = bt_keys.resolve_path(args.bt_keys)
+        if not _bk_path.is_file():
+            raise SystemExit("error: 密钥文件不存在: %s" % _bk_path)
+        bonds = bt_keys.load_keys(_bk_path, target_mac=args.keys_mac)
         if not bonds:
             raise SystemExit("error: 密钥文件里没有可用 bond"
                              "(bt_config 目标节未匹配?试试 --keys-mac)")

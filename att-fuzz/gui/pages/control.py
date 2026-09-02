@@ -29,8 +29,10 @@ NEW_TEMPLATE = {"name": "new-target", "mac": "", "search_string": "",
                     "latency": "外设延迟;0=每个连接事件必响应,崩溃判定最稳",
                     "connect_timeout": "连接超时秒数",
                     "pairing": "配对要求;阶段一只支持 none(免配对目标)",
-                    "bt_keys": "(可选)密钥文件路径(bt_config.conf 或提取 JSON);加密冒充用",
-                    "keys_mac": "(可选)bt_config 里目标设备 MAC(书写序);留空时回退 mac",
+                    "bt_keys": "(可选)密钥文件相对路径(如 bt_keys/vivo.conf);"
+                               "放 targets/bt_keys/ 下;加密冒充用",
+                    "keys_mac": "(可选)bt_config 里目标设备 MAC(书写序);"
+                                "99% 与 mac 相同,留空自动用 mac",
                     "phone_mac": "(可选)手机 public MAC(书写序);加密冒充冒充此地址",
                 }}
 
@@ -171,29 +173,34 @@ def page():
     with imp_card:
         ui.label("加密冒充参数").classes("text-sm font-semibold opacity-80")
         with ui.column().classes("gap-2 w-full"):
-            imp_btkeys = ui.input("bt-keys 路径(bt_config.conf 或 JSON)",
-                                  placeholder="att-fuzz/logs/vivo_bond_keys.json") \
-                .classes("w-full").props("dense outlined")
-            with ui.row().classes("gap-4 flex-wrap"):
-                imp_keys_mac = ui.input("keys-mac(耳机 MAC,书写序)",
-                                        placeholder="64:44:7B:EE:41:F4") \
-                    .classes("w-48").props("dense outlined")
-                imp_phone_mac = ui.input("phone-mac(手机 MAC,书写序)",
-                                         placeholder="00:C3:0A:02:6C:24") \
-                    .classes("w-48").props("dense outlined")
+            imp_btkeys = ui.select(
+                _bt_keys_files(), value=None,
+                label="bt-keys(密钥文件,targets/bt_keys/ 下)",
+                with_input=True).classes("w-full").props("dense outlined")
             imp_wall = ui.select(
                 _recent_ledgers(), value=None,
                 label="wall-ledger(可选,最近台账)",
                 with_input=True).classes("w-full").props("dense outlined")
             imp_duration = ui.number("imp-duration(秒,0=无限)", value=0, min=0,
                                      precision=0).classes("w-40")
+            ui.label("keys_mac/phone_mac 从档案 JSON 自动读取(无需手动填)").classes(
+                "text-[10px] opacity-40")
     imp_card.set_visibility(False)
 
     def _fill_imp_params(tgt: dict):
-        """从 target JSON 自动填充冒充参数(CLI 同款回退)。"""
-        imp_btkeys.value = tgt.get("bt_keys") or ""
-        imp_keys_mac.value = tgt.get("keys_mac") or tgt.get("mac") or ""
-        imp_phone_mac.value = tgt.get("phone_mac") or ""
+        """从 target JSON 自动填充冒充参数(bt_keys 下拉选中,其余从 JSON 读)。"""
+        bk = tgt.get("bt_keys")
+        if bk:
+            # 尝试匹配下拉选项
+            opts = imp_btkeys.options
+            if bk in (opts or []):
+                imp_btkeys.value = bk
+            else:
+                imp_btkeys.value = None
+        else:
+            # 无 bt_keys 字段时默认第一个文件(如果有)
+            _opts = imp_btkeys.options or []
+            imp_btkeys.value = _opts[0] if _opts else None
 
     # 初始载入档案(延迟到此处,确保 _fill_imp_params 已定义)
     load_target(sel.value)
@@ -299,13 +306,14 @@ def page():
                 ui.notify(err, type="negative")
                 return
             bt_keys = imp_btkeys.value or tgt.get("bt_keys")
-            keys_mac = imp_keys_mac.value or tgt.get("keys_mac") or tgt.get("mac")
-            phone_mac = imp_phone_mac.value or tgt.get("phone_mac")
+            keys_mac = tgt.get("keys_mac") or tgt.get("mac")
+            phone_mac = tgt.get("phone_mac")
             if not bt_keys:
-                ui.notify("加密冒充需要 bt-keys 路径(填入档案或冒充参数区)", type="warning")
+                ui.notify("缺少 bt_keys:请在 targets/bt_keys/ 放密钥文件"
+                          "或在档案 JSON 填 bt_keys 字段", type="warning")
                 return
             if not phone_mac:
-                ui.notify("加密冒充需要 phone-mac(填入档案或冒充参数区)", type="warning")
+                ui.notify("档案缺少 phone_mac(手机 public MAC)", type="warning")
                 return
             paths = _strategy_paths() or None
             ok, why = controller.run_impersonation(
@@ -435,6 +443,18 @@ def _recent_ledgers() -> list:
         lp = find_ledger(d)
         if lp:
             out.append(str(lp))
+    return out
+
+
+def _bt_keys_files() -> list:
+    """targets/bt_keys/ 下的密钥文件(.conf/.json),相对路径形式。"""
+    bk_dir = TARGETS_DIR / "bt_keys"
+    if not bk_dir.exists():
+        return []
+    out = []
+    for p in sorted(bk_dir.iterdir()):
+        if p.is_file() and p.suffix in (".conf", ".json"):
+            out.append("bt_keys/%s" % p.name)
     return out
 
 

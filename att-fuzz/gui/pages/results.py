@@ -204,15 +204,14 @@ def page():
         if source["kind"] == "live":
             _refresh_rows()
 
-    def _switch_source(e):
-        source["kind"] = e.value
-        if e.value == "live":
+    def _switch_source(val):
+        source["kind"] = val
+        if val == "live":
             live_radio.set_value("live")
         _refresh_rows()
 
-    live_radio.on_value_change(lambda e: _switch_source({"value": e.value or "live"}))
-    run_sel.on_value_change(lambda e: _switch_source({"value": "file"})
-                            if e.value else None)
+    live_radio.on_value_change(lambda e: _switch_source(e.value or "live"))
+    run_sel.on_value_change(lambda e: _switch_source("file") if e.value else None)
     for w in (cls_sel, layer_in, text_in, only_alerts):
         w.on_value_change(lambda *_: _refresh_rows())
     ui.timer(1.0, poll_live)

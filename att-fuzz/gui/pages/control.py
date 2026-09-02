@@ -9,7 +9,7 @@ from nicegui import ui
 from ..controller import controller, list_serial_ports
 from ..state import IDLE, PAUSED, RUNNING, state
 from ..theme import layout
-from ..util import TARGETS_DIR, STRATEGIES_DIR, find_ledger, gatt_tree_nodes, run_dirs
+from ..util import TARGETS_DIR, STRATEGIES_DIR, gatt_tree_nodes
 
 DEMO_TARGET = {"name": "demo-headphone (FakeHw)", "mac": "AA:BB:CC:DD:EE:FF",
                "mac_random": True, "conn_interval": 12, "latency": 0,
@@ -29,8 +29,10 @@ NEW_TEMPLATE = {"name": "new-target", "mac": "", "search_string": "",
                     "latency": "外设延迟;0=每个连接事件必响应,崩溃判定最稳",
                     "connect_timeout": "连接超时秒数",
                     "pairing": "配对要求;阶段一只支持 none(免配对目标)",
-                    "bt_keys": "(可选)密钥文件路径(bt_config.conf 或提取 JSON);加密冒充用",
-                    "keys_mac": "(可选)bt_config 里目标设备 MAC(书写序);留空时回退 mac",
+                    "bt_keys": "(可选)密钥文件相对路径(如 bt_keys/vivo.conf);"
+                               "放 targets/bt_keys/ 下;加密冒充用",
+                    "keys_mac": "(可选)bt_config 里目标设备 MAC(书写序);"
+                                "99% 与 mac 相同,留空自动用 mac",
                     "phone_mac": "(可选)手机 public MAC(书写序);加密冒充冒充此地址",
                 }}
 
@@ -73,15 +75,10 @@ def page():
                 return
             if name == "__demo__":
                 editor.value = json.dumps(DEMO_TARGET, ensure_ascii=False, indent=2)
-                _fill_imp_params(DEMO_TARGET)
                 return
             p = TARGETS_DIR / ("%s.json" % name if not name.endswith(".json") else name)
             if p.exists():
                 editor.value = p.read_text(encoding="utf-8")
-                try:
-                    _fill_imp_params(json.loads(p.read_text(encoding="utf-8")))
-                except json.JSONDecodeError:
-                    pass
 
         def save_target():
             try:
@@ -171,31 +168,13 @@ def page():
     with imp_card:
         ui.label("加密冒充参数").classes("text-sm font-semibold opacity-80")
         with ui.column().classes("gap-2 w-full"):
-            imp_btkeys = ui.input("bt-keys 路径(bt_config.conf 或 JSON)",
-                                  placeholder="att-fuzz/logs/vivo_bond_keys.json") \
-                .classes("w-full").props("dense outlined")
-            with ui.row().classes("gap-4 flex-wrap"):
-                imp_keys_mac = ui.input("keys-mac(耳机 MAC,书写序)",
-                                        placeholder="64:44:7B:EE:41:F4") \
-                    .classes("w-48").props("dense outlined")
-                imp_phone_mac = ui.input("phone-mac(手机 MAC,书写序)",
-                                         placeholder="00:C3:0A:02:6C:24") \
-                    .classes("w-48").props("dense outlined")
-            imp_wall = ui.select(
-                _recent_ledgers(), value=None,
-                label="wall-ledger(可选,最近台账)",
-                with_input=True).classes("w-full").props("dense outlined")
             imp_duration = ui.number("imp-duration(秒,0=无限)", value=0, min=0,
                                      precision=0).classes("w-40")
+            ui.label("bt_keys/keys_mac/phone_mac/wall_ledger 全从档案 JSON 读取,"
+                     "在上方编辑器填写").classes("text-[10px] opacity-40")
     imp_card.set_visibility(False)
 
-    def _fill_imp_params(tgt: dict):
-        """从 target JSON 自动填充冒充参数(CLI 同款回退)。"""
-        imp_btkeys.value = tgt.get("bt_keys") or ""
-        imp_keys_mac.value = tgt.get("keys_mac") or tgt.get("mac") or ""
-        imp_phone_mac.value = tgt.get("phone_mac") or ""
-
-    # 初始载入档案(延迟到此处,确保 _fill_imp_params 已定义)
+    # 初始载入档案
     load_target(sel.value)
 
     # ---------- 反向角色参数(条件显示) ----------
@@ -298,14 +277,15 @@ def page():
             if err:
                 ui.notify(err, type="negative")
                 return
-            bt_keys = imp_btkeys.value or tgt.get("bt_keys")
-            keys_mac = imp_keys_mac.value or tgt.get("keys_mac") or tgt.get("mac")
-            phone_mac = imp_phone_mac.value or tgt.get("phone_mac")
+            bt_keys = tgt.get("bt_keys")
+            keys_mac = tgt.get("keys_mac") or tgt.get("mac")
+            phone_mac = tgt.get("phone_mac")
             if not bt_keys:
-                ui.notify("加密冒充需要 bt-keys 路径(填入档案或冒充参数区)", type="warning")
+                ui.notify("档案缺少 bt_keys:请在 targets/bt_keys/ 放密钥文件"
+                          "并在 JSON 填 bt_keys 字段", type="warning")
                 return
             if not phone_mac:
-                ui.notify("加密冒充需要 phone-mac(填入档案或冒充参数区)", type="warning")
+                ui.notify("档案缺少 phone_mac(手机 public MAC)", type="warning")
                 return
             paths = _strategy_paths() or None
             ok, why = controller.run_impersonation(
@@ -316,7 +296,7 @@ def page():
                 max_cases=int(maxc.value or 0),
                 rounds=int(rounds_n.value or 0),
                 round_budget=int(round_budget.value or 100),
-                wall_ledger=imp_wall.value or None,
+                wall_ledger=tgt.get("wall_ledger"),
                 duration=float(imp_duration.value or 0),
                 serport=ser.value or None, demo=_demo())
             if not ok:
@@ -426,16 +406,6 @@ def page():
 def _demo() -> bool:
     from ..state import DEMO_MODE
     return DEMO_MODE
-
-
-def _recent_ledgers() -> list:
-    """logs/ 下最近 20 个 run 目录里的台账路径(供 wall-ledger 下拉)。"""
-    out = []
-    for d in run_dirs()[:20]:
-        lp = find_ledger(d)
-        if lp:
-            out.append(str(lp))
-    return out
 
 
 def _target_names():

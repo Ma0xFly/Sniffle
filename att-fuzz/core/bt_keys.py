@@ -34,6 +34,20 @@ KEY_PID = "LE_KEY_PID"
 KEY_LENC = "LE_KEY_LENC"
 KEY_LID = "LE_KEY_LID"
 
+REPO = Path(__file__).resolve().parents[2]
+TARGETS_DIR = REPO / "att-fuzz" / "targets"
+
+
+def resolve_path(path_str: str) -> Path:
+    """把 bt_keys 路径解析为绝对路径。
+    绝对路径照旧;相对路径解析到 att-fuzz/targets/ 下
+    (如 "bt_keys/vivo.conf" -> att-fuzz/targets/bt_keys/vivo.conf)。
+    这样 target JSON 里可以用相对路径引用密钥文件。"""
+    p = Path(path_str)
+    if p.is_absolute():
+        return p
+    return (TARGETS_DIR / path_str).resolve()
+
 
 def _hex(s: str) -> bytes | None:
     s = str(s).strip().replace(":", "").replace("-", "")

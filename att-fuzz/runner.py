@@ -98,6 +98,10 @@ def main():
                     help="bt_config.conf 里目标设备 MAC(书写序;缺省解析全部节)")
     ap.add_argument("--ltk", default=None, metavar="HEX",
                     help="直接给 LTK(16 字节 hex),与 --decrypt 配合,省 --bt-keys")
+    ap.add_argument("--scan-btconfig", action="store_true",
+                    help="扫描手机 bt_config.conf,列出所有 bond 设备")
+    ap.add_argument("--save-target", default=None, metavar="NAME",
+                    help="扫描后保存 target JSON(如 --save-target vivo_tws)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -113,6 +117,34 @@ def main():
 
     if args.decrypt:
         sys.exit(_decrypt_cli(args, outdir))
+
+    if args.scan_btconfig:
+        from core.bt_config_scanner import scan
+        result = scan(adb_serial=args.adb_serial)
+        print("手机: %s (%s)" % (result.phone_name, result.phone_mac))
+        print("Bond 设备:")
+        for i, dev in enumerate(result.devices):
+            print("  [%d] %s  %s  LTK=%s..  type=%s" %
+                  (i, dev.name, dev.mac, dev.ltk_hex[:16],
+                   "public" if dev.addr_type == 0 else "random"))
+        if args.save_target and result.devices:
+            dev = result.devices[0]
+            tgt = {
+                "name": dev.name or "unknown",
+                "mac": dev.mac.upper(),
+                "mac_random": dev.addr_type,
+                "phone_mac": result.phone_mac.upper(),
+                "ltk": dev.ltk_hex,
+                "conn_interval": 12,
+                "latency": 0,
+                "connect_timeout": 10,
+                "pairing": "none",
+            }
+            p = REPO / "att-fuzz" / "targets" / ("%s.json" % args.save_target)
+            p.write_text(json.dumps(tgt, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+            print("已保存: %s" % p)
+        sys.exit(0)
 
     if not args.target:
         raise SystemExit("error: 需要 --target(targets/*.json)或 --decrypt <pcap> 离线模式")

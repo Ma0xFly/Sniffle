@@ -747,6 +747,41 @@ def main():
     # 清理 snapshot 线程
     _ctl.controller._snapshot_stop.set()
 
+    # ---- bt_config_scanner mock adb 流程 ----
+    # 用真实 bt_config.conf 文件内容 mock _pull_bt_config,不走 adb
+    from core import bt_config_scanner as _bcs
+    _bt_cfg_path = REPO / "att-fuzz" / "logs" / "vivo_tws_bt_config_20260901.conf"
+    _bt_cfg_text = _bt_cfg_path.read_text(encoding="utf-8", errors="replace")
+    _orig_pull = _bcs._pull_bt_config
+    _orig_exists = _bcs.os.path.exists
+    _orig_run = _bcs.subprocess.run
+    _bcs._pull_bt_config = lambda adb, sa: _bt_cfg_text
+    _bcs.os.path.exists = lambda p: True if "adb" in str(p) else _orig_exists(p)
+    _bcs.subprocess.run = lambda *a, **k: type("R", (), {
+        "returncode": 0, "stdout": "device", "stderr": ""})()
+    try:
+        _sr = _bcs.scan(adb_serial="FAKE001")
+        assert _sr.phone_mac == "00:c3:0a:02:6c:24", _sr.phone_mac
+        assert len(_sr.devices) >= 1, _sr.devices
+        assert _sr.devices[0].ltk_hex and len(_sr.devices[0].ltk_hex) == 32
+        print("bt_config_scanner mock adb: phone=%s, %d devices, first=%s"
+              % (_sr.phone_mac, len(_sr.devices), _sr.devices[0].name))
+    finally:
+        _bcs._pull_bt_config = _orig_pull
+        _bcs.os.path.exists = _orig_exists
+        _bcs.subprocess.run = _orig_run
+
+    # ---- impersonation_fuzz ltk 内联回退 ----
+    # target JSON 带 ltk 字段,不传 bt_keys_path -> 直接用 inline LTK
+    # 验证:_drive_enc_handshake 用 inline LTK 能完成握手(enc_enabled=True)
+    _eghw2 = _EncGattHw(_LTK_WIRE_DR)
+    _et2 = SniffleTransport(_eghw2, pcap=None, jsonl_path=None,
+                            conn_interval_units=12)
+    _imp_dr._drive_enc_handshake(_et2, _LTK_WIRE_DR,
+                                 lambda **k: None)
+    assert _et2._enc_enabled, "inline LTK 握手应成功"
+    print("impersonation ltk 内联回退: 握手 OK (enc_enabled=True)")
+
     print("FakeHw 干跑测试全部通过")
 
 

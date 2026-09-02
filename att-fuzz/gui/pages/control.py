@@ -143,6 +143,64 @@ def page():
             ui.button("载入", on_click=lambda: load_target()).props("flat dense")
             ui.button("删除", on_click=delete_target).props("flat dense color=negative")
             ui.button("保存档案", on_click=save_target).props("dense color=primary")
+        ui.separator().classes("my-1")
+        ui.label("从手机扫描（需 root + USB 连接）").classes("text-xs opacity-60")
+        with ui.row().classes("items-center gap-2 w-full"):
+            scan_adb = ui.input("adb-serial", placeholder="手机序列号(可选)") \
+                .classes("w-56").props("dense outlined")
+            b_scan = ui.button("扫描手机", icon="phone_android",
+                               on_click=lambda: _scan_btconfig()) \
+                .props("dense color=primary")
+        scan_sel = ui.select(
+            [], value=None,
+            label="扫描结果(选中后自动填档案)",
+            with_input=False).classes("w-full").props("dense outlined")
+
+        def _scan_btconfig():
+            ok, why = controller.run_scan_btconfig(
+                adb_serial=scan_adb.value or None)
+            if not ok:
+                ui.notify(why, type="warning")
+
+        def _fill_from_scan(dev):
+            tgt = {
+                "name": dev.name or "unknown",
+                "mac": dev.mac.upper(),
+                "mac_random": dev.addr_type,
+                "phone_mac": state.bt_scan_results.phone_mac.upper(),
+                "ltk": dev.ltk_hex,
+                "conn_interval": 12,
+                "latency": 0,
+                "connect_timeout": 10,
+                "pairing": "none",
+            }
+            editor.value = json.dumps(tgt, ensure_ascii=False, indent=2)
+            ui.notify("已填充档案: %s (%s)" % (dev.name, dev.mac), type="positive")
+
+        def _on_scan_select(e):
+            sr = state.bt_scan_results
+            if not sr or not e.value:
+                return
+            mac = str(e.value)
+            dev = next((d for d in sr.devices if d.mac == mac), None)
+            if dev is None:
+                ui.notify("未找到设备 MAC=%s" % mac, type="warning")
+                return
+            _fill_from_scan(dev)
+
+        scan_sel.on_value_change(_on_scan_select)
+
+        def poll_scan():
+            sr = state.bt_scan_results
+            if not sr:
+                return
+            cur_opts = scan_sel.options or []
+            if len(cur_opts) == len(sr.devices):
+                return
+            # 用 MAC 字符串做选项(简单列表,不干扰 NiceGUI 事件)
+            scan_sel.set_options([d.mac for d in sr.devices])
+
+        ui.timer(1.0, poll_scan)
 
     # ---------- 策略与参数 ----------
     strat_card = ui.card().classes("w-full")
@@ -170,8 +228,8 @@ def page():
         with ui.column().classes("gap-2 w-full"):
             imp_duration = ui.number("imp-duration(秒,0=无限)", value=0, min=0,
                                      precision=0).classes("w-40")
-            ui.label("bt_keys/keys_mac/phone_mac/wall_ledger 全从档案 JSON 读取,"
-                     "在上方编辑器填写").classes("text-[10px] opacity-40")
+            ui.label("bt_keys/keys_mac/phone_mac/wall_ledger/ltk 全从档案 JSON 读取,"
+                     "用上方扫描手机按钮自动填充").classes("text-[10px] opacity-40")
     imp_card.set_visibility(False)
 
     # 初始载入档案
@@ -278,11 +336,12 @@ def page():
                 ui.notify(err, type="negative")
                 return
             bt_keys = tgt.get("bt_keys")
+            has_ltk = bool(tgt.get("ltk"))
             keys_mac = tgt.get("keys_mac") or tgt.get("mac")
             phone_mac = tgt.get("phone_mac")
-            if not bt_keys:
-                ui.notify("档案缺少 bt_keys:请在 targets/bt_keys/ 放密钥文件"
-                          "并在 JSON 填 bt_keys 字段", type="warning")
+            if not bt_keys and not has_ltk:
+                ui.notify("档案缺少密钥:请在 JSON 填 bt_keys 路径或 ltk 字段"
+                          "(可用扫描手机自动填充)", type="warning")
                 return
             if not phone_mac:
                 ui.notify("档案缺少 phone_mac(手机 public MAC)", type="warning")

@@ -64,7 +64,8 @@ def run(target: dict, outdir: Path, serport=None,
         max_cases: int = 0, adb_serial: str | None = None,
         strategy_paths=None, seed: int = 1, rounds: int = 0,
         round_budget: int = 100, wall_ledger=None,
-        on_transport=None, ledger=None) -> int:
+        on_transport=None, ledger=None,
+        stop_check=None, pause_check=None) -> int:
     """加密冒充主入口。duration>0 为运行秒数上限;0 表示一直跑到 Ctrl-C。
     bt_keys_path:Android bt_config.conf 或提取 JSON。
     keys_mac:bt_config 里目标设备(耳机)MAC(书写序)。
@@ -80,13 +81,15 @@ def run(target: dict, outdir: Path, serport=None,
         return _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
                            phone_mac, duration, max_cases, adb_serial,
                            strategy_paths, seed, rounds, round_budget,
-                           wall_ledger, on_transport, ledger)
+                           wall_ledger, on_transport, ledger,
+                           stop_check, pause_check)
 
 
 def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
                 phone_mac, duration, max_cases, adb_serial,
                 strategy_paths, seed, rounds, round_budget,
-                wall_ledger, on_transport=None, ledger=None) -> int:
+                wall_ledger, on_transport=None, ledger=None,
+                stop_check=None, pause_check=None) -> int:
     transport = make_transport(serport, target, outdir)
     if on_transport is not None:
         on_transport(transport)
@@ -101,23 +104,29 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     # ---- 1. 加载 bond 密钥 ----
-    if not bt_keys_path:
-        raise ImpersonationError("需要 --bt-keys 指定密钥文件(bt_config.conf 或 JSON)")
-    bonds = bt_keys.load_keys(bt_keys.resolve_path(bt_keys_path),
-                              target_mac=keys_mac)
-    if not bonds:
-        raise ImpersonationError("密钥文件里没有可用 bond(目标节未匹配?试试 --keys-mac)")
-    # 取第一个有 LTK 的 bond
-    bond = next((b for b in bonds if b.ltk), None)
-    if bond is None:
-        raise ImpersonationError("bond 无 LTK(LE_KEY_PENC 缺失)")
-    ltk_wire = bond.ltk   # dump 序;enable_encryption 内部反转
-    log.info("bond: %s ltk=%s rand=%s ediv=%s",
-             bond.name or bond.section, ltk_wire.hex(),
-             bond.rand.hex() if bond.rand else "?",
-             bond.ediv.hex() if bond.ediv else "?")
-    record(kind="bond_loaded", name=bond.name, section=bond.section,
-           ltk=ltk_wire.hex(), key_size=bond.key_size)
+    # 优先级：bt_keys 文件 > target JSON ltk 字段
+    if bt_keys_path:
+        bonds = bt_keys.load_keys(bt_keys.resolve_path(bt_keys_path),
+                                  target_mac=keys_mac)
+        if not bonds:
+            raise ImpersonationError("密钥文件里没有可用 bond(目标节未匹配?试试 --keys-mac)")
+        bond = next((b for b in bonds if b.ltk), None)
+        if bond is None:
+            raise ImpersonationError("bond 无 LTK(LE_KEY_PENC 缺失)")
+        ltk_wire = bond.ltk   # dump 序;enable_encryption 内部反转
+        log.info("bond: %s ltk=%s rand=%s ediv=%s",
+                 bond.name or bond.section, ltk_wire.hex(),
+                 bond.rand.hex() if bond.rand else "?",
+                 bond.ediv.hex() if bond.ediv else "?")
+        record(kind="bond_loaded", name=bond.name, section=bond.section,
+               ltk=ltk_wire.hex(), key_size=bond.key_size)
+    elif target.get("ltk"):
+        ltk_wire = bytes.fromhex(target["ltk"])
+        log.info("using inline LTK from target JSON: %s...", ltk_wire.hex()[:16])
+        record(kind="bond_loaded", name="target.json", ltk=ltk_wire.hex(),
+               key_size=16)
+    else:
+        raise ImpersonationError("需要 bt_keys 文件或 target JSON ltk 字段")
 
     # ---- 2. 设我们的地址 = 手机 public MAC(冒充) ----
     if not phone_mac:
@@ -131,6 +140,9 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
             if duration and time.time() - started >= duration:
                 log.info("duration reached, stopping")
                 break
+            if stop_check and stop_check():
+                log.info("stop requested, exiting impersonation loop")
+                break
             conn_no += 1
             log.info("=== impersonation connection #%d ===", conn_no)
             record(kind="conn_start", conn=conn_no)
@@ -138,7 +150,8 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
                 _do_one_connection(transport, target, ltk_wire, outdir,
                                    phone_wire, record, duration, started,
                                    strategy_paths, seed, max_cases, rounds,
-                                   round_budget, wall_ledger, ledger)
+                                   round_budget, wall_ledger, ledger,
+                                   stop_check, pause_check)
             except LinkDrop as drop:
                 log.warning("link dropped: %s", drop)
                 record(kind="link_drop", source=drop.source,
@@ -169,7 +182,8 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
 def _do_one_connection(transport, target, ltk_wire, outdir, phone_wire,
                         record, duration, started,
                         strategy_paths, seed, max_cases, rounds,
-                        round_budget, wall_ledger, ext_ledger=None):
+                        round_budget, wall_ledger, ext_ledger=None,
+                        stop_check=None, pause_check=None):
     """单次冒充连接:握手+发现(_handshake_and_setup)-> 加密 GATT(墙验证+语料)。"""
     gatt = _handshake_and_setup(transport, target, ltk_wire, phone_wire, record,
                                outdir=outdir)
@@ -179,7 +193,7 @@ def _do_one_connection(transport, target, ltk_wire, outdir, phone_wire,
     _do_encrypted_gatt(transport, target, outdir, record, duration, started,
                        gatt, strategy_paths, seed, max_cases, rounds,
                        round_budget, wall_ledger, ltk_wire, phone_wire,
-                       ext_ledger)
+                       ext_ledger, stop_check, pause_check)
 
     # 正常断链
     if transport.link_up:
@@ -355,7 +369,7 @@ def _wait_handshake_pdu(transport, opcode, timeout):
 def _do_encrypted_gatt(transport, target, outdir, record, duration, started,
                        gatt, strategy_paths, seed, max_cases, rounds,
                        round_budget, wall_ledger, ltk_wire, phone_wire,
-                       ext_ledger=None):
+                       ext_ledger=None, stop_check=None, pause_check=None):
     """加密链路上:0x05 墙验证读 + 认证面语料循环。
     gatt:已在 _handshake_and_setup 发现的加密 GATT 地图(复用,不重发现)。
     wall_ledger:阶段一台账路径(Path/str/None);None=跳过 0x05 墙验证。
@@ -452,7 +466,8 @@ def _do_encrypted_gatt(transport, target, outdir, record, duration, started,
                             gatt, transport, seed=seed, max_cases=max_cases,
                             rounds=rounds, round_budget=round_budget,
                             on_freeze=_on_freeze, on_link_drop=_on_link_drop,
-                            no_mtu_negotiate_meta=False)
+                            no_mtu_negotiate_meta=False,
+                            stop_check=stop_check, pause_check=pause_check)
     record(kind="corpus_done", **stats)
 
 

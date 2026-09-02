@@ -97,8 +97,10 @@ def page():
                            if p["elapsed"] else "—")
         alert_badge.set_text(str(p["alerts"]))
         # 图
-        donut.options = _donut_options(p["counts"])
-        rate.options = _rate_options(p["rate"])
+        donut._props["options"] = _donut_options(p["counts"])
+        donut.update()
+        rate._props["options"] = _rate_options(p["rate"])
+        rate.update()
         # 告警表
         alert_table.rows = [row_to_ui(r) | {"cls_text": CLASS_BADGE.get(
             r["classification"], ("", r["classification"]))[1]}

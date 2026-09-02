@@ -1197,3 +1197,37 @@ _st3 = run_stats(_empty_dir)
 assert _st3["cases"] == 0, _st3
 
 print("GUI find_ledger / run_stats 多台账自测通过")
+
+# ---- bt_keys 扩展：extract_phone_mac + parse_bt_config_all ----
+from core.bt_keys import extract_phone_mac, parse_bt_config_all  # noqa: E402
+_bt_cfg = REPO / "att-fuzz" / "logs" / "vivo_tws_bt_config_20260901.conf"
+# extract_phone_mac
+_phone_mac = extract_phone_mac(_bt_cfg)
+assert _phone_mac == "00:c3:0a:02:6c:24", _phone_mac
+print("extract_phone_mac: %s" % _phone_mac)
+# parse_bt_config_all (target_mac=None -> 全部 bond)
+_all_bonds = parse_bt_config_all(_bt_cfg)
+assert len(_all_bonds) >= 1, _all_bonds
+# 确认有 LTK 的 bond
+_ltk_bonds = [b for b in _all_bonds if b.ltk]
+assert len(_ltk_bonds) >= 1, "应有至少 1 个 LTK bond"
+assert _ltk_bonds[0].ltk and len(_ltk_bonds[0].ltk) == 16, "LTK 应 16 字节"
+# extract_phone_mac 对无 Adapter 的文件返回 None
+_no_adapter = Path(tempfile.mktemp(suffix=".conf"))
+_no_adapter.write_text("[Info]\nFoo=bar\n")
+assert extract_phone_mac(_no_adapter) is None
+_no_adapter.unlink()
+print("bt_keys extract_phone_mac + parse_bt_config_all 自测通过")
+
+# ---- bt_config_scanner 解析（mock：用本地 bt_config.conf 文件，不走 adb）----
+from core.bt_config_scanner import _parse_bt_config_file  # noqa: E402
+_scan_result = _parse_bt_config_file(str(_bt_cfg))
+assert _scan_result.phone_mac == "00:c3:0a:02:6c:24", _scan_result.phone_mac
+assert len(_scan_result.devices) >= 1, _scan_result.devices
+_dev0 = _scan_result.devices[0]
+assert _dev0.ltk_hex and len(_dev0.ltk_hex) == 32, "LTK hex 应 32 字符"
+assert _dev0.mac, "mac 不应为空"
+print("bt_config_scanner _parse_bt_config_file: phone=%s, %d devices, first=%s ltk=%s.."
+      % (_scan_result.phone_mac, len(_scan_result.devices),
+         _dev0.name, _dev0.ltk_hex[:16]))
+print("bt_config_scanner 自测通过")

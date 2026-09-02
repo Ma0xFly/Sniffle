@@ -34,7 +34,8 @@ ATT_FUZZ = REPO / "att-fuzz"
 
 MODE_TEXT = {"probe": "广播探测", "discover": "GATT 发现",
              "fuzz": "Fuzz 运行", "replay": "PDU 重放",
-             "impersonate": "加密冒充", "server": "反向角色"}
+             "impersonate": "加密冒充", "server": "反向角色",
+             "scan_btconfig": "扫描手机"}
 
 
 def list_serial_ports():
@@ -381,12 +382,21 @@ class FuzzController:
             from roles import impersonation_fuzz
             from core.monitor import ObservableLedger
             obs_ledger = ObservableLedger(od / "fuzz_ledger.jsonl")
-            obs_ledger.add_listener(bus.on_case)
 
             def on_transport(transport):
                 bus.attach_transport(transport)
                 self._transport = transport
                 self._start_snapshot(transport)
+                # transport 就绪 = 握手即将开始,切到 RUNNING(冒充角色
+                # 内部自管循环,不会调 begin_run,所以这里手动切)
+                state.begin_run(total=0)
+
+            # 包装 ledger listener:每条 case 同时推进进度计数
+            def _on_case_with_progress(result, case, replayable):
+                bus.on_case(result, case, replayable)
+                state.inc_done(case_id=result.case_id)
+
+            obs_ledger.add_listener(_on_case_with_progress)
 
             impersonation_fuzz.run(
                 target, od, serport=serport,
@@ -396,7 +406,9 @@ class FuzzController:
                 strategy_paths=strategy_paths, seed=seed,
                 rounds=rounds, round_budget=round_budget,
                 wall_ledger=wall_ledger,
-                on_transport=on_transport, ledger=obs_ledger)
+                on_transport=on_transport, ledger=obs_ledger,
+                stop_check=lambda: state.stop_requested.is_set(),
+                pause_check=lambda: state.pause_requested.is_set())
         return self.start("impersonate", fn)
 
     def run_server(self, target, name="Sniffle Server", duration=0.0,
@@ -412,12 +424,18 @@ class FuzzController:
             from roles import server_fuzz
             from core.monitor import ObservableLedger
             obs_ledger = ObservableLedger(od / "server_ledger.jsonl")
-            obs_ledger.add_listener(bus.on_case)
 
             def on_transport(transport):
                 bus.attach_transport(transport)
                 self._transport = transport
                 self._start_snapshot(transport)
+                state.begin_run(total=0)
+
+            def _on_case_with_progress(result, case, replayable):
+                bus.on_case(result, case, replayable)
+                state.inc_done(case_id=result.case_id)
+
+            obs_ledger.add_listener(_on_case_with_progress)
 
             server_fuzz.run(
                 target, od, serport=serport, duration=duration,
@@ -425,6 +443,19 @@ class FuzzController:
                 adb_serial=adb_serial,
                 on_transport=on_transport, ledger=obs_ledger)
         return self.start("server", fn)
+
+    def run_scan_btconfig(self, adb_serial=None):
+        """扫描手机 bt_config.conf,列出所有 bond 设备(无板子,无 transport)。"""
+        def fn():
+            state.set_status(CONNECTING)
+            state.log_line("扫描手机 bt_config.conf ...")
+            from core.bt_config_scanner import scan
+            result = scan(adb_serial=adb_serial)
+            with state.lock:
+                state.bt_scan_results = result
+            state.log_line("扫描完成: 手机 %s, %d 个 bond 设备" %
+                           (result.phone_mac, len(result.devices)))
+        return self.start("scan_btconfig", fn)
 
 
 # ---------- 模块级工具 ----------

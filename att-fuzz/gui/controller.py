@@ -406,7 +406,9 @@ class FuzzController:
                 strategy_paths=strategy_paths, seed=seed,
                 rounds=rounds, round_budget=round_budget,
                 wall_ledger=wall_ledger,
-                on_transport=on_transport, ledger=obs_ledger)
+                on_transport=on_transport, ledger=obs_ledger,
+                stop_check=lambda: state.stop_requested.is_set(),
+                pause_check=lambda: state.pause_requested.is_set())
         return self.start("impersonate", fn)
 
     def run_server(self, target, name="Sniffle Server", duration=0.0,

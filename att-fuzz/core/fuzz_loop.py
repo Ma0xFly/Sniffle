@@ -32,12 +32,15 @@ REPO = Path(__file__).resolve().parents[2]   # 仓库根(core/..)
 def run_corpus_loop(session, strategy_paths, ledger, gatt, transport,
                     seed=1, max_cases=0, rounds=0, round_budget=100,
                     on_freeze=None, on_link_drop=None,
-                    no_mtu_negotiate_meta=True) -> dict:
+                    no_mtu_negotiate_meta=True,
+                    stop_check=None, pause_check=None) -> dict:
     """通用确定性语料 + 变异轮循环。
     返回 {"done": N, "alerts": N, "stats": {cls: count}}。
     on_freeze(session)->bool: ATT_FREEZE 时调用,True=已重连续跑,False/None=停止。
     on_link_drop()->bool: LinkDrop/TransportError/SerialException 时调用,
-    True=已重连续跑,False/None=停止。无回调时 ATT_FREEZE/LinkDrop -> break。"""
+    True=已重连续跑,False/None=停止。无回调时 ATT_FREEZE/LinkDrop -> break。
+    stop_check()->bool: 每用例前检查,True=停止循环(GUI 停止按钮)。
+    pause_check()->bool: 每用例前检查,True=等待(GUI 暂停按钮)。"""
     try:
         import serial
         _serial_exc = serial.SerialException
@@ -88,6 +91,14 @@ def run_corpus_loop(session, strategy_paths, ledger, gatt, transport,
     alerts = done = 0
     try:
         for case in _iter_cases():
+            # GUI 暂停/停止检查(冒充模式用;直连模式 controller 自己检查)
+            if stop_check and stop_check():
+                log.info("stop requested, breaking corpus loop")
+                break
+            while pause_check and pause_check():
+                if stop_check and stop_check():
+                    break
+                time.sleep(0.15)
             # 用例可能要求未协商链路(⑤层):按需切换连接协商状态。
             # no_mtu_negotiate_meta=False(加密冒充)时不切,保持当前协商态。
             if no_mtu_negotiate_meta:

@@ -140,6 +140,9 @@ def _run_locked(target, outdir, serport, bt_keys_path, keys_mac,
             if duration and time.time() - started >= duration:
                 log.info("duration reached, stopping")
                 break
+            if stop_check and stop_check():
+                log.info("stop requested, exiting impersonation loop")
+                break
             conn_no += 1
             log.info("=== impersonation connection #%d ===", conn_no)
             record(kind="conn_start", conn=conn_no)

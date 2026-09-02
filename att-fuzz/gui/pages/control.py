@@ -146,7 +146,6 @@ def page():
             ui.button("载入", on_click=lambda: load_target()).props("flat dense")
             ui.button("删除", on_click=delete_target).props("flat dense color=negative")
             ui.button("保存档案", on_click=save_target).props("dense color=primary")
-        load_target(sel.value)
 
     # ---------- 策略与参数 ----------
     strat_card = ui.card().classes("w-full")
@@ -195,6 +194,9 @@ def page():
         imp_btkeys.value = tgt.get("bt_keys") or ""
         imp_keys_mac.value = tgt.get("keys_mac") or tgt.get("mac") or ""
         imp_phone_mac.value = tgt.get("phone_mac") or ""
+
+    # 初始载入档案(延迟到此处,确保 _fill_imp_params 已定义)
+    load_target(sel.value)
 
     # ---------- 反向角色参数(条件显示) ----------
     srv_card = ui.card().classes("w-full")

@@ -154,13 +154,28 @@ def page():
         scan_sel = ui.select(
             [], value=None,
             label="扫描结果(选中后自动填档案)",
-            with_input=True).classes("w-full").props("dense outlined")
+            with_input=False).classes("w-full").props("dense outlined")
 
         def _scan_btconfig():
             ok, why = controller.run_scan_btconfig(
                 adb_serial=scan_adb.value or None)
             if not ok:
                 ui.notify(why, type="warning")
+
+        def _fill_from_scan(dev):
+            tgt = {
+                "name": dev.name or "unknown",
+                "mac": dev.mac.upper(),
+                "mac_random": dev.addr_type,
+                "phone_mac": state.bt_scan_results.phone_mac.upper(),
+                "ltk": dev.ltk_hex,
+                "conn_interval": 12,
+                "latency": 0,
+                "connect_timeout": 10,
+                "pairing": "none",
+            }
+            editor.value = json.dumps(tgt, ensure_ascii=False, indent=2)
+            ui.notify("已填充档案: %s (%s)" % (dev.name, dev.mac), type="positive")
 
         def _on_scan_select(e):
             sr = state.bt_scan_results
@@ -169,29 +184,21 @@ def page():
             mac = str(e.value)
             dev = next((d for d in sr.devices if d.mac == mac), None)
             if dev is None:
+                ui.notify("未找到设备 MAC=%s" % mac, type="warning")
                 return
-            tgt = {
-                "name": dev.name or "unknown",
-                "mac": dev.mac.upper(),
-                "mac_random": dev.addr_type,
-                "phone_mac": sr.phone_mac.upper(),
-                "ltk": dev.ltk_hex,
-                "conn_interval": 12,
-                "latency": 0,
-                "connect_timeout": 10,
-                "pairing": "none",
-            }
-            editor.value = json.dumps(tgt, ensure_ascii=False, indent=2)
-            ui.notify("已填充档案: %s" % dev.name, type="positive")
+            _fill_from_scan(dev)
 
         scan_sel.on_value_change(_on_scan_select)
 
         def poll_scan():
             sr = state.bt_scan_results
-            if sr and len(scan_sel.options or []) != len(sr.devices):
-                opts = [{"label": "%s — %s" % (d.mac, d.name),
-                         "value": d.mac} for d in sr.devices]
-                scan_sel.set_options(opts)
+            if not sr:
+                return
+            cur_opts = scan_sel.options or []
+            if len(cur_opts) == len(sr.devices):
+                return
+            # 用 MAC 字符串做选项(简单列表,不干扰 NiceGUI 事件)
+            scan_sel.set_options([d.mac for d in sr.devices])
 
         ui.timer(1.0, poll_scan)
 

@@ -33,7 +33,8 @@ REPO = Path(__file__).resolve().parents[2]
 ATT_FUZZ = REPO / "att-fuzz"
 
 MODE_TEXT = {"probe": "广播探测", "discover": "GATT 发现",
-             "fuzz": "Fuzz 运行", "replay": "PDU 重放"}
+             "fuzz": "Fuzz 运行", "replay": "PDU 重放",
+             "impersonate": "加密冒充", "server": "反向角色"}
 
 
 def list_serial_ports():
@@ -213,6 +214,7 @@ class FuzzController:
                         "att_mtu": transport.att_mtu,
                         "ll_max": transport.ll_max,
                         "tx_queue_full": transport.tx_queue_full,
+                        "encrypted": getattr(transport, "_enc_enabled", False),
                     })
                     with state.lock:
                         state.conn.update(snap)
@@ -362,6 +364,67 @@ class FuzzController:
         if not pdu_hex:
             return False, "该用例缺 replay.pdu,无法重放"
         return self.run_replay(pdu_hex, target, times=times, serport=serport, demo=demo)
+
+    def run_impersonation(self, target, bt_keys_path=None, keys_mac=None,
+                          phone_mac=None, strategy_paths=None, seed=1,
+                          max_cases=0, rounds=0, round_budget=100,
+                          wall_ledger=None, duration=0.0,
+                          outdir=None, serport=None, demo=False):
+        """加密冒充模式:角色自管 serial_guard + transport。
+        on_transport 回调桥接事件总线 + 快照;ObservableLedger 桥接 case 台账。"""
+        def fn():
+            od = Path(outdir) if outdir else _new_outdir()
+            od.mkdir(parents=True, exist_ok=True)
+            state.outdir = str(od)
+            state.set_status(CONNECTING)
+            state.log_line("加密冒充启动 -> %s" % od)
+            from roles import impersonation_fuzz
+            from core.monitor import ObservableLedger
+            obs_ledger = ObservableLedger(od / "fuzz_ledger.jsonl")
+            obs_ledger.add_listener(bus.on_case)
+
+            def on_transport(transport):
+                bus.attach_transport(transport)
+                self._transport = transport
+                self._start_snapshot(transport)
+
+            impersonation_fuzz.run(
+                target, od, serport=serport,
+                bt_keys_path=bt_keys_path, keys_mac=keys_mac,
+                phone_mac=phone_mac, duration=duration,
+                max_cases=max_cases,
+                strategy_paths=strategy_paths, seed=seed,
+                rounds=rounds, round_budget=round_budget,
+                wall_ledger=wall_ledger,
+                on_transport=on_transport, ledger=obs_ledger)
+        return self.start("impersonate", fn)
+
+    def run_server(self, target, name="Sniffle Server", duration=0.0,
+                   interval_ms=200, adb_serial=None, outdir=None,
+                   serport=None, demo=False):
+        """反向角色模式:角色自管 serial_guard + transport。"""
+        def fn():
+            od = Path(outdir) if outdir else _new_outdir()
+            od.mkdir(parents=True, exist_ok=True)
+            state.outdir = str(od)
+            state.set_status(CONNECTING)
+            state.log_line("反向角色启动 -> %s" % od)
+            from roles import server_fuzz
+            from core.monitor import ObservableLedger
+            obs_ledger = ObservableLedger(od / "server_ledger.jsonl")
+            obs_ledger.add_listener(bus.on_case)
+
+            def on_transport(transport):
+                bus.attach_transport(transport)
+                self._transport = transport
+                self._start_snapshot(transport)
+
+            server_fuzz.run(
+                target, od, serport=serport, duration=duration,
+                name=name, interval_ms=interval_ms,
+                adb_serial=adb_serial,
+                on_transport=on_transport, ledger=obs_ledger)
+        return self.start("server", fn)
 
 
 # ---------- 模块级工具 ----------

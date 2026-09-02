@@ -669,6 +669,84 @@ def main():
     print("加密冒充语料循环: %d 用例, stats=%s" %
           (_cstats["done"], _fstats))
 
+    # ---- GUI 控制器:加密冒充 run_impersonation ----
+    # 复用 _EncGattHw + 测试 LTK,走 controller.run_impersonation 全流程:
+    # on_transport 桥接 bus -> state 事件;ObservableLedger -> state push_case;
+    # 握手 -> 发现 -> 语料循环 -> 产出台账。
+    import contextlib
+    import json as _json_ctl
+    from gui import controller as _ctl
+    from gui import state as _gstate
+    from gui import bus as _gbus
+
+    # 写 bt_keys JSON(与 _EncGattHw 用的 LTK 一致)
+    _btkeys_path = REPO / "att-fuzz" / "logs" / "dryrun-ctl-btkeys.json"
+    _btkeys_path.write_text(_json_ctl.dumps({
+        "ltk_hex": _LTK_WIRE_DR.hex(),
+        "rand_hex": "0000000000000000",
+        "ediv_hex": "0000",
+    }, ensure_ascii=False))
+
+    _ctl_dir = REPO / "att-fuzz" / "logs" / "dryrun-ctl-imp"
+    _ctl_dir.mkdir(parents=True, exist_ok=True)
+    for _f in _ctl_dir.glob("*"):
+        _f.unlink()
+
+    _orig_make = _imp_dr.make_transport
+    _orig_guard = _imp_dr.serial_guard
+
+    def _fake_make(serport, tgt, od):
+        od = Path(od) if not isinstance(od, Path) else od
+        from sniffle.pcap import PcapBleWriter
+        _hw = _EncGattHw(_LTK_WIRE_DR)
+        return SniffleTransport(_hw, pcap=PcapBleWriter(str(od / "capture.pcap")),
+                                jsonl_path=od / "transport.jsonl",
+                                conn_interval_units=tgt.get("conn_interval", 12))
+    _imp_dr.make_transport = _fake_make
+    _imp_dr.serial_guard = lambda *a, **k: contextlib.nullcontext()
+
+    _tgt_ctl = {"mac": "AABBCCDDEEFF", "mac_random": True,
+                "conn_interval": 12, "latency": 0}
+    ok, why = _ctl.controller.run_impersonation(
+        _tgt_ctl, bt_keys_path=str(_btkeys_path),
+        keys_mac="AABBCCDDEEFF", phone_mac="11:22:33:44:55:C0",
+        strategy_paths=[REPO / "att-fuzz" / "strategies" / "handles.yaml"],
+        seed=1, max_cases=4, rounds=0, round_budget=100,
+        wall_ledger=None, duration=0.0,
+        outdir=_ctl_dir, serport=None, demo=True)
+    assert ok, why
+    # 等工作线程完成
+    if _ctl.controller._thread:
+        _ctl.controller._thread.join(timeout=30)
+    _imp_dr.make_transport = _orig_make
+    _imp_dr.serial_guard = _orig_guard
+
+    # 检查 state
+    assert _gstate.state.mode == "impersonate", _gstate.state.mode
+    assert len(_gstate.state.results) > 0, "results 应有 case"
+    assert _gstate.state.outdir == str(_ctl_dir), _gstate.state.outdir
+    # 台账文件应存在
+    assert (_ctl_dir / "fuzz_ledger.jsonl").exists()
+    assert (_ctl_dir / "impersonation_ledger.jsonl").exists()
+    # impersonation 台账应有 enc_engaged 事件(握手成功的证据)
+    _imp_recs = [_json_ctl.loads(l) for l in
+                 (_ctl_dir / "impersonation_ledger.jsonl").open()]
+    _imp_kinds = [r.get("kind") for r in _imp_recs]
+    assert "enc_engaged" in _imp_kinds, _imp_kinds
+    assert "bond_loaded" in _imp_kinds, _imp_kinds
+    # state.results 应有分类记录(来自 ObservableLedger -> bus.on_case)
+    _cls_counts = _gstate.state.class_counts
+    assert sum(_cls_counts.values()) > 0, _cls_counts
+    # state 事件流应有握手相关事件(transport-level,通过 bus 桥接)
+    _ev_kinds = [e.get("kind") for e in _gstate.state.events]
+    print("GUI 控制器 run_impersonation:握手+发现+语料+台账 OK "
+          "(enc_engaged=%s, %d cases, %d events)"
+          % ("enc_engaged" in _imp_kinds, len(_gstate.state.results),
+             len(_gstate.state.events)))
+
+    # 清理 snapshot 线程
+    _ctl.controller._snapshot_stop.set()
+
     print("FakeHw 干跑测试全部通过")
 
 

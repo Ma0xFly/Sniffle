@@ -20,3 +20,4 @@ fw/*.zip
 fw/ti_drivers_config.*
 fw/ti_sysbios_config.*
 fw/ti_utils_build_linker.cmd.*
+att-fuzz/.vscode/

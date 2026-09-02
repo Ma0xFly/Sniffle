@@ -82,10 +82,27 @@ def load_ledger(path) -> list:
     return out
 
 
-RUN_MARKS = ("ledger.jsonl", "gatt_map.json", "capture.pcap", "transport.jsonl")
+RUN_MARKS = ("ledger.jsonl", "gatt_map.json", "capture.pcap", "transport.jsonl",
+             "fuzz_ledger.jsonl", "impersonation_ledger.jsonl")
 
 # 自测产物目录(test_dryrun.py 自测写入),非真实会话,页面不显示
 SELFTEST_DIRS = ("dryrun-test",)
+
+# 台账文件名优先序(发现/直连/fuzz 用 ledger.jsonl,加密冒充用 fuzz_ledger.jsonl
+# 或 impersonation_ledger.jsonl,反向角色用 server_ledger.jsonl)
+LEDGER_NAMES = ["ledger.jsonl", "fuzz_ledger.jsonl",
+                "impersonation_ledger.jsonl", "server_ledger.jsonl"]
+
+
+def find_ledger(run_dir) -> Path | None:
+    """在一个 run 目录下找到第一个存在的台账文件。
+    优先序:ledger.jsonl > fuzz_ledger.jsonl > impersonation_ledger.jsonl
+    > server_ledger.jsonl。"""
+    for name in LEDGER_NAMES:
+        p = Path(run_dir) / name
+        if p.is_file():
+            return p
+    return None
 
 
 def run_dirs() -> list:
@@ -111,7 +128,8 @@ def run_dirs() -> list:
 
 def run_stats(run_dir) -> dict:
     """一个 run 目录的概要:用例数/分类分布/时间。"""
-    recs = load_ledger(Path(run_dir) / "ledger.jsonl")
+    ledger_path = find_ledger(run_dir)
+    recs = load_ledger(ledger_path) if ledger_path else []
     counts = {}
     for r in recs:
         c = r.get("classification", "?")
@@ -120,6 +138,8 @@ def run_stats(run_dir) -> dict:
     if ts is None:               # 纯发现任务没有台账,用目录时间兜底
         ts = Path(run_dir).stat().st_mtime
     gm = Path(run_dir) / "gatt_map.json"
+    if not gm.exists():
+        gm = Path(run_dir) / "gatt_enc.json"
     gatt_str = "—"
     if gm.exists():
         try:
@@ -195,7 +215,7 @@ def build_summary_md(run_dir, stats=None) -> str:
     ]
     for cls, n in sorted(st["counts"].items(), key=lambda kv: -kv[1]):
         lines.append("| %s | %d |" % (cls, n))
-    alerts = [r for r in load_ledger(run_dir / "ledger.jsonl")
+    alerts = [r for r in load_ledger(find_ledger(run_dir) or (run_dir / "ledger.jsonl"))
               if r.get("classification") in
               ("TIMEOUT", "DISCONNECT_TERM", "DISCONNECT_SUP", "HEALTH_DEGRADED",
                "ATT_FREEZE")]
@@ -209,6 +229,8 @@ def build_summary_md(run_dir, stats=None) -> str:
                 _hex(r.get("terminate_reason")),
                 "; ".join(r.get("notes") or [])[:80]))
     gatt_path = run_dir / "gatt_map.json"
+    if not gatt_path.exists():
+        gatt_path = run_dir / "gatt_enc.json"
     if gatt_path.exists():
         try:
             g = json.loads(gatt_path.read_text())

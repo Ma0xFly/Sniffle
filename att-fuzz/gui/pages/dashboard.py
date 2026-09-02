@@ -49,6 +49,10 @@ def page():
                     _chip("TX 队列满", "是" if snap["tx_queue_full"] else "否",
                           "red" if snap["tx_queue_full"] else "grey")
                     _chip("重连次数", str(snap["reconnects"]))
+                    _chip("加密", "加密" if snap.get("encrypted") else "明文",
+                          "green" if snap.get("encrypted") else "grey")
+                    _chip("ATT 冻结", str(snap.get("att_freeze_count", 0)),
+                          "brown" if snap.get("att_freeze_count", 0) else "grey")
                     _chip("固件", str(snap["fw_version"] or "—"))
             ui.timer(1.0, render_health)
 
@@ -69,7 +73,12 @@ def page():
                 ui.label("传输层事件流").classes("text-sm font-semibold opacity-80")
                 kind_filter = ui.select(
                     [None, "inject", "rx_att", "terminate", "state", "connected",
-                     "fw_debug", "marker", "data_size", "dle_rsp"],
+                     "fw_debug", "marker", "data_size", "dle_rsp",
+                     "enc_req_sent", "enc_rsp_recv", "enc_engaged",
+                     "peer_burst_handled", "gatt_discovered",
+                     "wall_handles_loaded", "corpus_done", "read_ok",
+                     "read_timeout", "conn_start", "link_drop", "bond_loaded",
+                     "setaddr", "impersonation_error"],
                     value=None, label="过滤 kind", with_input=True) \
                     .classes("w-40 text-xs")
             event_log = ui.log(max_lines=300).classes("w-full h-56 text-[11px]")

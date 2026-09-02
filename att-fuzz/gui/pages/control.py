@@ -9,7 +9,7 @@ from nicegui import ui
 from ..controller import controller, list_serial_ports
 from ..state import IDLE, PAUSED, RUNNING, state
 from ..theme import layout
-from ..util import TARGETS_DIR, STRATEGIES_DIR, find_ledger, gatt_tree_nodes, run_dirs
+from ..util import TARGETS_DIR, STRATEGIES_DIR, gatt_tree_nodes
 
 DEMO_TARGET = {"name": "demo-headphone (FakeHw)", "mac": "AA:BB:CC:DD:EE:FF",
                "mac_random": True, "conn_interval": 12, "latency": 0,
@@ -75,15 +75,10 @@ def page():
                 return
             if name == "__demo__":
                 editor.value = json.dumps(DEMO_TARGET, ensure_ascii=False, indent=2)
-                _fill_imp_params(DEMO_TARGET)
                 return
             p = TARGETS_DIR / ("%s.json" % name if not name.endswith(".json") else name)
             if p.exists():
                 editor.value = p.read_text(encoding="utf-8")
-                try:
-                    _fill_imp_params(json.loads(p.read_text(encoding="utf-8")))
-                except json.JSONDecodeError:
-                    pass
 
         def save_target():
             try:
@@ -173,36 +168,13 @@ def page():
     with imp_card:
         ui.label("加密冒充参数").classes("text-sm font-semibold opacity-80")
         with ui.column().classes("gap-2 w-full"):
-            imp_btkeys = ui.select(
-                _bt_keys_files(), value=None,
-                label="bt-keys(密钥文件,targets/bt_keys/ 下)",
-                with_input=True).classes("w-full").props("dense outlined")
-            imp_wall = ui.select(
-                _recent_ledgers(), value=None,
-                label="wall-ledger(可选,最近台账)",
-                with_input=True).classes("w-full").props("dense outlined")
             imp_duration = ui.number("imp-duration(秒,0=无限)", value=0, min=0,
                                      precision=0).classes("w-40")
-            ui.label("keys_mac/phone_mac 从档案 JSON 自动读取(无需手动填)").classes(
-                "text-[10px] opacity-40")
+            ui.label("bt_keys/keys_mac/phone_mac/wall_ledger 全从档案 JSON 读取,"
+                     "在上方编辑器填写").classes("text-[10px] opacity-40")
     imp_card.set_visibility(False)
 
-    def _fill_imp_params(tgt: dict):
-        """从 target JSON 自动填充冒充参数(bt_keys 下拉选中,其余从 JSON 读)。"""
-        bk = tgt.get("bt_keys")
-        if bk:
-            # 尝试匹配下拉选项
-            opts = imp_btkeys.options
-            if bk in (opts or []):
-                imp_btkeys.value = bk
-            else:
-                imp_btkeys.value = None
-        else:
-            # 无 bt_keys 字段时默认第一个文件(如果有)
-            _opts = imp_btkeys.options or []
-            imp_btkeys.value = _opts[0] if _opts else None
-
-    # 初始载入档案(延迟到此处,确保 _fill_imp_params 已定义)
+    # 初始载入档案
     load_target(sel.value)
 
     # ---------- 反向角色参数(条件显示) ----------
@@ -305,12 +277,12 @@ def page():
             if err:
                 ui.notify(err, type="negative")
                 return
-            bt_keys = imp_btkeys.value or tgt.get("bt_keys")
+            bt_keys = tgt.get("bt_keys")
             keys_mac = tgt.get("keys_mac") or tgt.get("mac")
             phone_mac = tgt.get("phone_mac")
             if not bt_keys:
-                ui.notify("缺少 bt_keys:请在 targets/bt_keys/ 放密钥文件"
-                          "或在档案 JSON 填 bt_keys 字段", type="warning")
+                ui.notify("档案缺少 bt_keys:请在 targets/bt_keys/ 放密钥文件"
+                          "并在 JSON 填 bt_keys 字段", type="warning")
                 return
             if not phone_mac:
                 ui.notify("档案缺少 phone_mac(手机 public MAC)", type="warning")
@@ -324,7 +296,7 @@ def page():
                 max_cases=int(maxc.value or 0),
                 rounds=int(rounds_n.value or 0),
                 round_budget=int(round_budget.value or 100),
-                wall_ledger=imp_wall.value or None,
+                wall_ledger=tgt.get("wall_ledger"),
                 duration=float(imp_duration.value or 0),
                 serport=ser.value or None, demo=_demo())
             if not ok:
@@ -434,28 +406,6 @@ def page():
 def _demo() -> bool:
     from ..state import DEMO_MODE
     return DEMO_MODE
-
-
-def _recent_ledgers() -> list:
-    """logs/ 下最近 20 个 run 目录里的台账路径(供 wall-ledger 下拉)。"""
-    out = []
-    for d in run_dirs()[:20]:
-        lp = find_ledger(d)
-        if lp:
-            out.append(str(lp))
-    return out
-
-
-def _bt_keys_files() -> list:
-    """targets/bt_keys/ 下的密钥文件(.conf/.json),相对路径形式。"""
-    bk_dir = TARGETS_DIR / "bt_keys"
-    if not bk_dir.exists():
-        return []
-    out = []
-    for p in sorted(bk_dir.iterdir()):
-        if p.is_file() and p.suffix in (".conf", ".json"):
-            out.append("bt_keys/%s" % p.name)
-    return out
 
 
 def _target_names():

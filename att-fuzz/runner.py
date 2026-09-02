@@ -163,11 +163,14 @@ def main():
                                      adb_serial=args.adb_serial))
         if args.impersonate:
             from roles import impersonation_fuzz
+            bt_keys = args.bt_keys or target.get("bt_keys")
+            keys_mac = args.keys_mac or target.get("keys_mac")
+            phone_mac = args.phone_mac or target.get("phone_mac")
             sys.exit(impersonation_fuzz.run(target, outdir,
                                            serport=args.serport,
-                                           bt_keys_path=args.bt_keys,
-                                           keys_mac=args.keys_mac,
-                                           phone_mac=args.phone_mac,
+                                           bt_keys_path=bt_keys,
+                                           keys_mac=keys_mac,
+                                           phone_mac=phone_mac,
                                            duration=args.imp_duration,
                                            max_cases=args.max_cases,
                                            adb_serial=args.adb_serial,

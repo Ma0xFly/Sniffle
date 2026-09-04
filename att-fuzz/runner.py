@@ -304,9 +304,22 @@ def _probe(target, outdir, serport) -> int:
     with serial_guard(serport or target.get("serport"), "CLI 广播探测"):
         transport = SniffleTransport(SniffleHW(serport=serport or target.get("serport")),
                                      conn_interval_units=target.get("conn_interval", 12))
-        wire, _ = transport._parse_mac(target["mac"])
-        print("probe: 扫描目标 %s ..." % target["mac"])
-        r = transport.probe(wire)
+        if target.get("mac"):
+            wire, _ = transport._parse_mac(target["mac"])
+            print("probe: 扫描目标 %s ..." % target["mac"])
+            r = transport.probe(wire)
+        else:
+            ss = target.get("search_string", "")
+            print("probe: 按广播串搜索 %r ..." % ss)
+            try:
+                wire, implied_random = transport._find_target_by_string(
+                        ss.encode("latin-1"), timeout=15)
+                r = {"found": True, "addr": wire.hex(),
+                     "addr_type": "random" if implied_random else "public",
+                     "rssi": 0}
+            except Exception as e:
+                print("probe: %s" % e)
+                r = {"found": False}
     if not r["found"]:
         print("probe: 15s 内未发现目标广播。请确认:")
         print("  - 耳机已进入配对/广播模式(开盖或长按配对键,且未被手机占用)")

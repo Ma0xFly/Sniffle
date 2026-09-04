@@ -1,0 +1,9 @@
+{
+  "name": "miband10",
+  "mac": "",
+  "search_string": "43xe",
+  "mac_random": 1,
+  "conn_interval": 12,
+  "latency": 0,
+  "connect_timeout": 10
+}

@@ -283,7 +283,7 @@ class SniffleTransport:
                 if s in msg.body:
                     mac = bytes(msg.AdvA)
                     self._log_event("target_found", mac=mac.hex())
-                    return mac, not msg.TxAdd
+                    return mac, bool(msg.TxAdd)
         raise TransportError("target not found by advertisement string: %r" % s)
 
     def connect(self, target, retries: int = 5,

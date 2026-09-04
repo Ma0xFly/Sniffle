@@ -357,7 +357,7 @@ class SniffleTransport:
             mac_random = target.get("mac_random", True)
             if implied_random != mac_random:
                 log.warning("地址类型疑不匹配: 最高字节 0x%02X 暗示 %s, 目标档案设 %s",
-                            msb, "random" if implied_random else "public",
+                            mac[-1], "random" if implied_random else "public",
                             "random" if mac_random else "public")
         else:
             mac, mac_random = self._find_target_by_string(

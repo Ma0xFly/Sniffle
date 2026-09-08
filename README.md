@@ -1,683 +1,333 @@
-# Sniffle
+# Sniffle ATT/GATT Fuzzer
 
-**Sniffle is a sniffer for Bluetooth 5 and 4.x (LE) using TI CC1352/CC26x2 hardware.**
+基于 [nccgroup/Sniffle](https://github.com/nccgroup/Sniffle)（CC2652R1F BLE 嗅探器）的 **Bluetooth Low Energy 攻击面 Fuzzer**。保留原版嗅探器全部能力，新增：
 
-Sniffle has a number of useful features, including:
+- **ATT/GATT 确定性语料 fuzzing**（8 层攻击面，目标无关，换设备只换档案）
+- **签名驱动变异引擎**（跨 run 学习，能量加权，时序门控）
+- **信号分类**（HEALTH_DEGRADED / ATT_FREEZE / DISCONNECT 等 8 类）
+- **加密冒充**（用手机 bond LTK 冒充 central，绕过 0x05 认证墙，打认证面）
+- **反向角色**（伪装 GATT server 攻击手机，带 logcat 崩溃 oracle）
+- **被动嗅探配对 + 密钥收割**（SMP 解析、legacy 密钥推导）
+- **离线 pcap 解密**（加密 BLE 流量 → ATT/SMP 明文）
+- **手机扫描自动填档案**（adb 读 bt_config.conf，一键生成 target JSON）
+- **NiceGUI 可视化控制台**（四页面：控制台/仪表盘/结果/历史）
 
-* Support for BT5/4.2 extended length advertisement and data packets
-* Support for BT5 Channel Selection Algorithms #1 and #2
-* Support for all BT5 PHY modes (regular 1M, 2M, and coded modes)
-* Support for sniffing only advertisements and ignoring connections
-* Support for channel map, connection parameter, and PHY change operations
-* Support for advertisement filtering by MAC address and RSSI
-* Support for BT5 extended advertising (non-periodic)
-* Support for capturing advertisements from a target MAC on all three primary
-  advertising channels using a single sniffer. **This makes connection detection
-  nearly 3x more reliable than most other sniffers that only sniff one advertising
-  channel.**
-* Easy to extend host-side software written in Python
-* PCAP export compatible with the Ubertooth
-* Wireshark compatible plugin
+配套文档：《[设计.md](设计.md)》（架构与平台事实）、《[进度.md](进度.md)》（当前状态）、《[使用指南.md](使用指南.md)》（详细使用手册，本文为摘要版）、《[固件开发避坑指南.md](固件开发避坑指南.md)》（编译烧录）。
 
-## Prerequisites
+---
 
-* Any of the following hardware devices (functionally equivalent for Sniffle)
-    * TI CC26x2R Launchpad Board: <https://www.ti.com/tool/LAUNCHXL-CC26X2R1>
-    * TI CC2652RB Launchpad Board: <https://www.ti.com/tool/LP-CC2652RB>
-    * TI CC1352R Launchpad Board: <https://www.ti.com/tool/LAUNCHXL-CC1352R1>
-    * TI CC1352P Launchpad Board: <https://www.ti.com/tool/LAUNCHXL-CC1352P>
-    * TI CC2652R7 Launchpad Board: <https://www.ti.com/tool/LP-CC2652R7>
-    * TI CC1352P7 Launchpad Board: <https://www.ti.com/tool/LP-CC1352P7>
-    * TI CC2651P3 Launchpad Board: <https://www.ti.com/tool/LP-CC2651P3>
-    * TI CC1354P10 Launchpad Board: <https://www.ti.com/tool/LP-EM-CC1354P10>
-    * SONOFF CC2652P USB Dongle Plus: <https://itead.cc/product/sonoff-zigbee-3-0-usb-dongle-plus/>
-    * EC Catsniffer V3 CC1352 & RP2040 <https://github.com/ElectronicCats/CatSniffer>
-* ARM GNU Toolchain for AArch32 bare-metal target (arm-none-eabi): <https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads>
-* TI SimpleLink Low Power F2 SDK 8.30.01.01: <https://www.ti.com/tool/download/SIMPLELINK-LOWPOWER-F2-SDK/8.30.01.01>
-* TI DSLite Programmer Software: see below
-* Python 3.9+ with PySerial installed
+## 硬件与固件
 
-**If you don't want to go through the effort of setting up a build
-environment for the firmware, you can just flash prebuilt firmware binaries
-using UniFlash/DSLite.** Prebuilt firmware binaries are attached to releases
-on the GitHub releases tab of this project. When using prebuilt firmware, be
-sure to use the Python code corresponding to the release tag rather than master
-to avoid compatibility issues with firmware that is behind the master branch.
+### 支持的硬件
 
-### Installing GCC
+以下任一设备（功能等价，本项目实测为 **CC2652R1F LaunchPad**）：
 
-The `arm-none-eabi-gcc` provided through various Linux distributions' package
-manager often lacks some header files or requires some changes to linker
-configuration. For minimal hassle, I suggest using the ARM GCC linked above.
-You can just download and extract the prebuilt executables.
+- TI CC26x2R LaunchPad：<https://www.ti.com/tool/LAUNCHXL-CC26X2R1>
+- TI CC2652RB / CC1352R / CC1352P LaunchPad（链接见上游 README）
+- TI CC2652R7 / CC1352P7 / CC2651P3 / CC1354P10 LaunchPad
+- SONOFF CC2652P USB Dongle Plus / EC Catsniffer V3
 
-### Installing the TI SDK
+### 依赖
 
-The TI SDK is provided as an executable binary that extracts a bunch of source
-code once you accept the license agreement. On Linux and Mac, the default
-installation directory is inside`~/ti/`. This works fine and my makefiles
-expect this path, so I suggest just going with the default here. The same
-applies for the TI SysConfig tool.
+- **ARM GNU Toolchain**（arm-none-eabi）：<https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads>
+- **TI SimpleLink Low Power F2 SDK 8.30.01.01**：<https://www.ti.com/tool/download/SIMPLELINK-LOWPOWER-F2-SDK/8.30.01.01>
+- **TI DSLite Programmer**（或用 UniFlash GUI）
+- Python 3.9+：`pip install pyserial pyyaml pycryptodome nicegui`
 
-Once the SDK has been extracted, you will need to edit one makefile to match
-your build environment. Within `~/ti/simplelink_cc13xx_cc26xx_sdk_8_30_01_01`
-(or wherever the SDK was installed) there is a makefile named `imports.mak`.
-The only paths that need to be set here to build Sniffle are for GCC, XDC,
-cmake and SysConfig. We don't need the CCS compiler. See the diff below as
-an example, and adapt for wherever you installed things.
+> 不想搭编译环境？直接烧预编译固件（本项目补丁固件 **1.12.0**，见仓库根 `*.hex`）。注意：预编译固件要配对应版本的 Python 代码。
 
-```
-diff --git a/imports.mak b/imports.mak
-index b2cf5bf59..389d1a7c3 100644
---- a/imports.mak
-+++ b/imports.mak
-@@ -18,14 +18,14 @@
- # will build using each non-empty *_ARMCOMPILER cgtool.
- #
- 
--XDC_INSTALL_DIR        ?= /home/username/ti/xdctools_3_62_01_15_core
--SYSCONFIG_TOOL         ?= /home/username/ti/ccs1270/ccs/utils/sysconfig_1.21.1/sysconfig_cli.sh
-+XDC_INSTALL_DIR        ?= $(HOME)/ti/xdctools_3_62_01_15_core
-+SYSCONFIG_TOOL         ?= $(HOME)/ti/sysconfig_1.21.1/sysconfig_cli.sh
- 
--CMAKE                  ?= /home/username/cmake-3.21.3/bin/cmake
-+CMAKE                  ?= cmake
- PYTHON                 ?= python3
- 
- TICLANG_ARMCOMPILER    ?= /home/username/ti/ccs1270/ccs/tools/compiler/ti-cgt-armllvm_3.2.2.LTS-0
--GCC_ARMCOMPILER        ?= /home/username/arm-none-eabi-gcc/12.3.Rel1-0
-+GCC_ARMCOMPILER        ?= $(HOME)/arm_tools/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi
- IAR_ARMCOMPILER        ?= /home/username/iar9.50.2
- 
- # Uncomment this to enable the TFM build
-```
-
-As of SDK version 8.30.01.01, to compile with recent versions of GCC (and binutils),
-a small modification to the SDK is needed to avoid linking errors
-"Unknown destination type (ARM/Thumb)" and "dangerous relocation: unsupported relocation".
-
-```
-diff --git a/kernel/tirtos7/packages/ti/sysbios/family/arm/m3/Hwi_asm_gcc.s b/kernel/tirtos7/packages/ti/sysbios/family/arm/m3/Hwi_asm_gcc.s
-index 187cfd744..4cbf0d384 100644
---- a/kernel/tirtos7/packages/ti/sysbios/family/arm/m3/Hwi_asm_gcc.s
-+++ b/kernel/tirtos7/packages/ti/sysbios/family/arm/m3/Hwi_asm_gcc.s
-@@ -236,6 +236,7 @@ lab$1:
- @ user code has set the PRIMASK and not cleared it, or when single
- @ stepping with interrupts disabled.
- 
-+.type ti_sysbios_family_arm_m3_Hwi_interruptsAreDisabledButShouldNotBe, %function
- ti_sysbios_family_arm_m3_Hwi_interruptsAreDisabledButShouldNotBe:
-         b   ti_sysbios_family_arm_m3_Hwi_interruptsAreDisabledButShouldNotBe
- 
-diff --git a/kernel/tirtos7/packages/ti/sysbios/family/arm/v8m/Hwi_asm_gcc.s b/kernel/tirtos7/packages/ti/sysbios/family/arm/v8m/Hwi_asm_gcc.s
-index 717f49c9a..1c83ed725 100644
---- a/kernel/tirtos7/packages/ti/sysbios/family/arm/v8m/Hwi_asm_gcc.s
-+++ b/kernel/tirtos7/packages/ti/sysbios/family/arm/v8m/Hwi_asm_gcc.s
-@@ -226,6 +226,7 @@ lab$1:
- @ user code has set the PRIMASK and not cleared it, or when single
- @ stepping with interrupts disabled.
- 
-+.type ti_sysbios_family_arm_v8m_Hwi_interruptsAreDisabledButShouldNotBe, %function
- ti_sysbios_family_arm_v8m_Hwi_interruptsAreDisabledButShouldNotBe:
-         b   ti_sysbios_family_arm_v8m_Hwi_interruptsAreDisabledButShouldNotBe
-```
-
-After making this modification, you will need to recompile the SDK.
-
-```
-cd ~/ti/simplelink_cc13xx_cc26xx_sdk_8_30_01_01
-make build-gcc -j5
-```
-
-### Obtaining DSLite
-
-DSLite is TI's command line programming and debug server tool for XDS110
-debuggers. The CC26xx and CC13xx Launchpad boards both include XDS110 debuggers.
-Unfortunately, TI does not provide a standalone command line DSLite download.
-The easiest way to obtain DSLite is to install [UniFlash](http://www.ti.com/tool/download/UNIFLASH)
-from TI. It's available for Linux, Mac, and Windows. The DSLite executable will
-be located at `deskdb/content/TICloudAgent/linux/ccs_base/DebugServer/bin/DSLite`
-relative to the UniFlash installation directory. On Linux, the default UniFlash
-installation directory is inside `~/ti/`.
-
-You should place the DSLite executable directory within your `$PATH`.
-
-## Firmware Building
-
-Once the GCC, DSLite, and the SDK is installed and operational, building
-Sniffle should be straight forward. Just navigate to the `fw` directory and
-run `make`. If you didn't install the SDK to the default directory, you may
-need to edit `SIMPLELINK_SDK_INSTALL_DIR` in the makefile.
-
-If building for or installing on a some variant of Launchpad other than CC26x2R,
-you must specify `PLATFORM=xxx`, either as an argument to make, or by defining
-it as an environment variable prior to invoking make. Supported values for `PLATFORM`
-can be found in the firmware makefile. Be sure to perform a `make clean` before
-building for a different platform.
-
-## Firmware Installation (TI Launchpad Board)
-
-To install Sniffle on a (plugged in) CC26x2R Launchpad using DSLite, run
-`make load` within the `fw` directory. For any other Launchpad models, you must
-specify the `PLATFORM` argument to make as descirbed above. You can also flash
-the compiled `sniffle.hex` binary using the UniFlash GUI.
-
-## Firmware Installation (SONOFF USB Dongle)
-
-To install Sniffle on a SONOFF CC2652P dongle (equipped with a CP2102N USB/UART
-bridge), use the [JelmerT/cc2538-bsl](https://github.com/JelmerT/cc2538-bsl) utility
-to flash the firmware using the built-in ROM bootloader with the following command:
-
-```
-python3 cc2538-bsl.py -p /dev/ttyUSB0 --bootloader-sonoff-usb -ewv sniffle_cc1352p1_cc2652p1.hex
-```
-
-As of January 10, 2025, there is a bug in `cc2538-bsl` that prevents it from
-resetting the CC2562P chip in the Sonoff dongle after flashing. The fix for this
-is in pull request [173](https://github.com/JelmerT/cc2538-bsl/pull/173), which
-has yet to be merged. In the interim, while waiting for the pull request to be
-merged, you can use my fork at <https://github.com/sultanqasim/cc2538-bsl>.
-
-In 2022, due to COVID-19 pandemic chip shortages, some Sonoff CC2652P dongles were
-built with CP2102 (non-N) USB/UART bridge chips that are capped at 921600 baud. If
-you have one of these, you will need to flash a different firmware image that uses
-a slower baud rate of 921600. This special slower baud rate build is named
-`sniffle_cc1352p1_cc2652p1_1M.hex` (build variant `CC2652P1F_1M`). You will also
-need to invoke Sniffle utilities with the option `-b 921600` to override the
-default baud rate of 2000000.
-
-**WARNING:** Do not flash the wrong build variant using the bootloader, or you
-risk bricking the device and locking yourself out of the bootloader. For Sonoff
-CC2652P devices, use the `sniffle_cc1352p1_cc2652p1.hex` file (`CC2652P1F` build
-variant) or the sniffle_cc1352p1_cc2652p1_1M.hex` file (`CC2652P1F_1M` build
-variant) for a 921600 baud rate. If you flash the wrong variant and lock yourself
-out of the bootloader, it may be possible to recover the device using JTAG/SWD.
-
-## Firmware Installation (Catsniffer V3)
-
-Electronic Cats provides a Catnip Uploader tool for loading firmware. For detailed information,
-refer to the [repository](https://github.com/ElectronicCats/CatSniffer-Tools/tree/main).
-Download the tool and follow these commands:
+### 固件编译
 
 ```bash
-# Fetch the CatSniffer tools and their dependencies
-[ec@sniffle]$ git clone https://github.com/ElectronicCats/CatSniffer-Tools.git
-[ec@sniffle]$ cd CatSniffer-Tools/catnip_uploader
-[ec@sniffle]$ pip install -r requirements.txt
-
-# Download the available firmwares
-[ec@sniffle]$ python3 catnip_uploader.py releases
-[INFO] Fetching assets from https://api.github.com/repos/ElectronicCats/CatSniffer-Firmware/releases/latest
-[INFO] Release: board-v3.x-v1.1.0
-[INFO] Fetching assets from https://api.github.com/repos/nccgroup/Sniffle/releases/latest
-[INFO] Release: v1.10.0
-[INFO] Found local release: releases_board-v3.x-v1.1.0
-[SUCCESS] Local release is up to date: board-v3.x-v1.1.0
-[SUCCESS] Available releases:
-0: sniffer_fw_CC1352P_7_v1.10.hex
-1: airtag_scanner_CC1352P_7_v1.0.hex
-2: nccgroup_v1.10.0_sniffle_cc1352p7_1M.hex
-3: airtag_spoofer_CC1352P_7_v1.0.hex
-4: sniffle_CC1352P_7_v1.7.hex
-
-# Install the firmware
-[ec@sniffle]$ python3 catnip_uploader.py load 2 COMPORT
+cd fw
+make            # 默认 CC26x2R；其他板型指定 PLATFORM=xxx
+make clean      # 换 PLATFORM 前必须先 clean
 ```
 
-You need to change the *COMPORT* to the appropriate path for your board.
-Using the command `python3 catnip_uploader.py load 2 COMPORT`, you will load
-the `2: nccgroup_v1.10.0_sniffle_cc1352p7_1M.hex` firmware.
-**To load the firmware Catsniffer V3 requires SerialPassthroughwithboot**.
+SDK 不在默认目录时，改 makefile 里的 `SIMPLELINK_SDK_INSTALL_DIR`。
 
-**WARNING:** Do not flash the wrong build variant using the bootloader, or you
-risk bricking the device and locking yourself out of the bootloader. If you
-use the `catnip_uploader.py` script to fetch and install the firmware, it will
-only present compatible firmware. However, if you choose to compile and install
-the firmware manually, be sure you use the correct build variant. For CatSniffer
-v3 devices, use the `sniffle_cc1352p7_1M.hex` file (`CC1352P74_1M` build variant).
-CatSniffer v1.x/v2.x devices use a different chip variant (CC1352P1) that needs a
-different firmware build (`CC1352P1F3_1M` variant, `sniffle_cc1352p1_cc2652p1_1M.hex`
-image). Sniffle has not been tested on CatSniffer v1.x/v2.x devices but they will
-probably work as long as you flash the appropriate build variant. If you flash the
-wrong variant and lock yourself out of the bootloader, it may be possible to recover
-the device using JTAG/SWD.
+### 固件烧录（LaunchPad）
 
-## Sniffer Usage
-
-```
-[skhan@serpent python_cli]$ ./sniff_receiver.py --help
-usage: sniff_receiver.py [-h] [-s SERPORT] [-b BAUDRATE] [-c {37,38,39}] [-p] [-r RSSI]
-                         [-m MAC] [-i IRK] [-S STRING] [-a] [-A] [-e] [-H] [-l] [-q]
-                         [-Q PRELOAD] [-n] [-C] [-d] [-o OUTPUT]
-
-Host-side receiver for Sniffle BLE5 sniffer
-
-options:
-  -h, --help            show this help message and exit
-  -s SERPORT, --serport SERPORT
-                        Sniffer serial port name
-  -b BAUDRATE, --baudrate BAUDRATE
-                        Sniffer serial port baud rate
-  -c {37,38,39}, --advchan {37,38,39}
-                        Advertising channel to listen on
-  -p, --pause           Pause sniffer after disconnect
-  -r RSSI, --rssi RSSI  Filter packets by minimum RSSI
-  -m MAC, --mac MAC     Filter packets by advertiser MAC
-  -i IRK, --irk IRK     Filter packets by advertiser IRK
-  -S STRING, --string STRING
-                        Filter for advertisements containing the specified string
-  -a, --advonly         Passive scanning, don't follow connections
-  -A, --scan            Active scanning, don't follow connections
-  -e, --extadv          Capture BT5 extended (auxiliary) advertising
-  -H, --hop             Hop primary advertising channels in extended mode
-  -l, --longrange       Use long range (coded) PHY for primary advertising
-  -q, --quiet           Don't display empty packets
-  -Q PRELOAD, --preload PRELOAD
-                        Preload expected encrypted connection parameter changes
-  -n, --nophychange     Ignore encrypted PHY mode changes
-  -C, --crcerr          Capture packets with CRC errors
-  -d, --decode          Decode advertising data
-  -o OUTPUT, --output OUTPUT
-                        PCAP output file name
+```bash
+cd fw
+make load       # DSLite 烧录（其他板型加 PLATFORM 参数）
 ```
 
-The XDS110 debugger on the Launchpad boards creates two serial ports. On
-Linux, they are typically named `ttyACM0` and `ttyACM1`. The first of the
-two created serial ports is used to communicate with Sniffle. By default,
-the Python CLI communicates using the first CDC-ACM device it sees matching
-the TI XDS110 USB VID:PID combo, or the first Sonoff dongle it sees. You
-may need to override this with the `-s` command line option if you are using
-a different USB serial adapter or have additional USB CDC-ACM devices connected.
+或用 UniFlash GUI 烧 `sniffle.hex`。烧完 `python3 python_cli/version_check.py` 确认版本为 **1.12.0**（补丁固件含 0x28 门控 / TX 队列满上报 / TERMINATE reason / INITIATING 重试 / RX 8 深队列）。
 
-For the `-r` (RSSI filter) option, a value of -40 tends to work well if the
-sniffer is very close to or nearly touching the transmitting device. The RSSI
-filter is very useful for ignoring irrelevant advertisements in a busy RF
-environment. The RSSI filter is only active when capturing advertisements,
-as you always want to capture data channel traffic for a connection being
-followed. You probably don't want to use an RSSI filter when MAC filtering
-is active, as you may lose advertisements from the MAC address of interest
-when the RSSI is too low.
+---
 
-To hop along with advertisements and have reliable connection sniffing, you
-need to set up a MAC filter with the `-m` option. You should specify the
-MAC address of the peripheral device, not the central device. To figure out
-which MAC address to sniff, you can run the sniffer with RSSI filtering while
-placing the sniffer near the target. This will show you advertisements from
-the target device including its MAC address. It should be noted that many BLE
-devices advertise with a randomized MAC address rather than their "real" fixed
-MAC written on a label.
+## 快速开始（三步）
 
-Most new BLE devices use Resolvable Private Addresses (RPAs) rather than fixed
-static or public addresses. While you can set up a MAC filter to a particular
-RPA, devices periodically change their RPA. RPAs can can be resolved (associated
-with a particular device) if the Identity Resolving Key (IRK) is known. Sniffle
-supports automated RPA resolution when the IRK is provided. This avoids the need
-to keep updating the MAC filter whenever the RPA changes. You can specify an
-IRK for Sniffle with the `-i` option; the IRK should be provided in hexadecimal
-format, with the most significant byte (MSB) first. Specifying an IRK allows
-Sniffle to channel hop with an advertiser the same way it does with a MAC filter.
-The IRK based MAC filtering feature (`-i`) is mutually exclusive with the static
-MAC filtering feature (`-m`).
+### 第 1 步：填目标档案
 
-There is also a convenience feature to automatically identify the MAC address
-of the advertiser whose advertisement or scan response contains a specified
-string (series of bytes). This is useful for devices with RPAs where the IRK is
-unknown, but the advertisement contains a sufficiently unique static string suitable
-for identification. This feature uses the `-S` option, with the string specified
-using standard escape sequences. For example, to look for an advertiser whose
-advertisement contains the hex byte sequence DE AD BE EF, specify
-`-S "\xDE\xAD\xBE\xEF"`. To look for an advertiser with the string "hello",
-simply specify `-S "hello"`. When the string search feature is used, initially
-all MAC addresses will be accepted till an advertisement containing the search
-string is found. After that, a MAC filter will be set up with the corresponding
-advertiser's MAC address, and any RSSI filter would be automatically disabled.
+编辑 `att-fuzz/targets/<name>.json`：
 
-To enable following auxiliary pointers in Bluetooth 5 extended advertising,
-enable the `-e` option. To improve performance and reliability in extended
-advertising capture, this option disables hopping on the primary advertising
-channels, even when a MAC filter is set up. If you are unsure whether a
-connection will be established via legacy or extended advertising, you can
-enable the `-H` flag in conjunction with `-e` to perform primary channel
-hopping with legacy advertisements, and scheduled listening to extended
-advertisement auxiliary packets. When combining `-e` and `-H`, the
-reliability of connection detection may be reduced compared to hopping on
-primary (legacy) or secondary (extended) advertising channels alone.
-
-To sniff the long range PHY on primary advertising channels, specify the `-l`
-option. Note that no hopping between primary advertising channels is supported
-in long range mode, since all long range advertising uses the BT5 extended
-mechanism. Under the extended mechanism, auxiliary pointers on all three
-primary channels point to the same auxiliary packet, so hopping between
-primary channels is unnecessary.
-
-To not print empty data packets on screen while following a connection, use
-the `-q` flag. This makes it easier to observe meaningful communications in
-real time, but may obscure when connection following is flaky or lost.
-
-For encrypted connections, Sniffle supports detecting connection parameter
-updates even when the encryption key is unknown, and it attempts to measure
-the new parameters. However, if you know the new connection interval and Instant
-delta to expect in encrypted connection parameter updates, you can specify them
-with the `--preload`/`-Q` option to improve performance/reliability.
-The expected Interval:DeltaInstant pair should be provided as colon separated
-integers. Interval is an integer representing multiples of 1.25 ms (as defined
-in LL\_CONNECTION\_UPDATE\_IND). DeltaInstant is the number of connection events
-between when the connection update packet is transmitted and when the new
-parameters are applied. DeltaInstant must be greater than or equal to 6, as per
-the Bluetooth specification's requirements for central devices. If multiple
-encrypted parameter updates are expected, you can provide multiple parameter
-pairs, separated by commas (eg. `6:7,39:8`). If you have a device that issues
-encrypted PHY update PDUs that don't change the PHY, or puts out encrypted LE
-power control PDUs without any PHY changes, you can use the `--nophychange`/`-n`
-option.
-
-To stop the sniffer, press Ctrl-C.
-
-If for some reason the sniffer firmware locks up and refuses to capture any
-traffic even with filters disabled, you should reset the sniffer MCU. On
-Launchpad boards, the reset button is located beside the micro USB port.
-
-## Scanner Usage
-
-```
-usage: scanner.py [-h] [-s SERPORT] [-b BAUDRATE] [-c {37,38,39}] [-r RSSI] [-l] [-d] [-o OUTPUT]
-
-Scanner utility for Sniffle BLE5 sniffer
-
-options:
-  -h, --help            show this help message and exit
-  -s SERPORT, --serport SERPORT
-                        Sniffer serial port name
-  -b BAUDRATE, --baudrate BAUDRATE
-                        Sniffer serial port baud rate
-  -c {37,38,39}, --advchan {37,38,39}
-                        Advertising channel to listen on
-  -r RSSI, --rssi RSSI  Filter packets by minimum RSSI
-  -l, --longrange       Use long range (coded) PHY for primary advertising
-  -d, --decode          Decode advertising data
-  -o OUTPUT, --output OUTPUT
-                        PCAP output file name
-
+```json
+{
+  "name": "headphone",
+  "mac": "A4:C1:38:xx:xx:xx",
+  "search_string": "",
+  "mac_random": true,
+  "conn_interval": 12,
+  "latency": 0,
+  "connect_timeout": 10
+}
 ```
 
-The scanner command line arguments work the same as the sniffer. The purpose of
-the scanner utility is to gather a list of nearby devices advertising, and
-actively issue scan requests for observed devices, without having the deluge
-of fast scrolling data you get with the sniffer utility. The hardware/firmware
-will enter an active scanning mode where it will report received advertisements,
-issue scan requests for scannable ones, and report received scan responses.
-The scanner utility will record and report observed MAC addresses only once
-without spamming the display. Once you're done capturing advertisements, press
-Ctrl-C to stop scanning and report the results. The scanner will show the last
-advertisement and scan response from each target. Scan results will be sorted
-by RSSI in descending order.
+`mac` / `search_string` 至少填一个。`mac_random`：1=随机地址（多数耳机），0=public。不确定先跑 `--probe`。
 
-## Usage Examples
+### 第 2 步：冒烟（发现 GATT）
 
-Sniff all advertisements on channel 38, ignore RSSI < -50, stay on advertising
-channel even when CONNECT\_REQs are seen.
-
-```
-./sniff_receiver.py -c 38 -r -50 -a
+```bash
+python3 att-fuzz/runner.py --target att-fuzz/targets/headphone.json --discover-only
 ```
 
-Sniff advertisements from MAC 12:34:56:78:9A:BC, stay on advertising channel
-even when CONNECT\_REQs are seen, save advertisements to `data1.pcap`.
+预期：`ll_max=251 att_mtu=247` + 服务列表。这一步验证串口/固件/连接/发现全链路。
 
-```
-./sniff_receiver.py -m 12:34:56:78:9A:BC -a -o data1.pcap
-```
+### 第 3 步：首跑（50 例冒烟）
 
-Sniff advertisements and connections for the first MAC address seen with
-RSSI >= -40. The RSSI filter will be disabled automatically once a MAC address
-has been locked onto. Save captured data to `data2.pcap`.
-
-```
-./sniff_receiver.py -m top -r -40 -o data2.pcap
+```bash
+python3 att-fuzz/runner.py --target att-fuzz/targets/headphone.json --max-cases 50
 ```
 
-Sniff advertisements and connections from the peripheral with big endian IRK
-4E0BEA5355866BE38EF0AC2E3F0EBC22. Preload two expected encrypted connection
-parameter updates; the first with an Interval of 6, occuring at an instant 6
-connection events after an encrypted LL\_CONNECTION\_UPDATE\_IND is observed
-by the sniffer. The second expected encrypted connection update has an Interval
-of 39, and DeltaInstant of 6 too.
+产物在 `att-fuzz/logs/run-<时间戳>/`。分类分布应大量 `ERROR_RESPONSE` + 少量 `OK_RESPONSE`，几乎无 `TIMEOUT`。确认无异常再放开全量或过夜。
+
+---
+
+## 目标档案 targets/*.json
+
+| 字段 | 说明 |
+|---|---|
+| `name` | 档案名（也是文件名） |
+| `mac` | 目标地址（书写序 `AA:BB:CC:DD:EE:FF`） |
+| `search_string` | 广播名片段（地址轮换的耳机优先用这个） |
+| `mac_random` | 1=随机地址，0=public |
+| `conn_interval` | 连接间隔 ×1.25ms（建议 12~24） |
+| `latency` | 外设延迟（0=每事件必响应，判定最稳） |
+| `connect_timeout` | 连接超时秒数 |
+| `phone_mac` | **冒充用**：手机 public MAC（书写序） |
+| `ltk` | **冒充用**：bond LTK（32 hex 字符，从 bt_config 提取） |
+| `bt_keys` | **冒充用**：密钥文件路径（相对路径解析到 `targets/` 下，如 `bt_keys/vivo.conf`） |
+| `wall_ledger` | **冒充用(可选)**：阶段一台账路径，供 0x05 墙 handle 加载 |
+| `keys_mac` | **冒充用(可选)**：bt_config 里设备 MAC，99% 与 `mac` 相同，留空自动用 `mac` |
+
+密钥文件放 `att-fuzz/targets/bt_keys/`，从手机 root 提取 `/data/misc/bluedroid/bt_config.conf` 复制过来即可。
+
+---
+
+## Fuzzer CLI 全量参考
 
 ```
-./sniff_receiver.py -i 4E0BEA5355866BE38EF0AC2E3F0EBC22 -Q 6:6,39:6
+python3 att-fuzz/runner.py \
+  --target att-fuzz/targets/<name>.json \
+  [--strategy att-fuzz/strategies]        # 策略目录/文件,默认全目录
+  [--seed 1]                              # 确定性种子
+  [--max-cases 0]                         # 0=全量
+  [--rounds 0] [--round-budget 100]      # 变异轮数/每轮预算
+  [--outdir logs/run-xxx] [--serport /dev/ttyACM0]
+  [--discover-only] [--probe]
+  [--replay <PDU_HEX>] [--replay-case <ID>] [--ledger <path>]
+  [--impersonate] [--bt-keys <file>] [--keys-mac <MAC>]
+  [--phone-mac <MAC>] [--imp-duration 0] [--wall-ledger <path>]
+  [--server] [--server-name "..."] [--server-duration 0] [--adb-serial <serial>]
+  [--sniff-pairing] [--sniff-duration 0] [--sniff-mac <MAC>] [--sniff-hold]
+  [--decrypt <pcap>] [--ltk <hex>]
+  [--scan-btconfig] [--save-target <name>]
+  [-v]
 ```
 
-Sniff BT5 extended advertisements and connections from nearby (RSSI >= -55) devices.
+### 模式 1：直连 Fuzz（默认）
 
-```
-./sniff_receiver.py -r -55 -e
-```
+免配对直连 → GATT 发现 → 确定性语料 → 可选变异轮。
 
-Sniff legacy and extended advertisements and connections from the device with the
-specified MAC address. Save captured data to `data3.pcap`.
-
-```
-./sniff_receiver.py -eH -m 12:34:56:78:9A:BC -o data3.pcap
+```bash
+python3 att-fuzz/runner.py --target att-fuzz/targets/headphone.json
+python3 att-fuzz/runner.py --target ... --strategy att-fuzz/strategies/offsets.yaml   # 只跑某层
+python3 att-fuzz/runner.py --target ... --rounds 3 --round-budget 100                # 变异轮
+python3 att-fuzz/runner.py --target ... --replay-case h-read-0000 --ledger logs/run-xxx/ledger.jsonl  # 复现
 ```
 
-Sniff extended advertisements and connections using the long range primary PHY on
-channel 38.
+### 模式 2：加密冒充（`--impersonate`）
 
-```
-./sniff_receiver.py -le -c 38
-```
+用手机 bond LTK 冒充手机地址，加密链路绕过 0x05 认证墙，跑认证面语料。
 
-Actively scan on channel 39 for advertisements with RSSI greater than -50.
+```bash
+# 方式 A：LTK 内联在 target JSON（扫描手机自动生成档案默认用这个）
+python3 att-fuzz/runner.py --target att-fuzz/targets/vivo_tws.json --impersonate
 
-```
-./scanner.py -c 39 -r -50
-```
-
-## Obtaining the IRK
-
-If you have a rooted Android phone, you can find IRKs (and LTKs) in the Bluedroid
-configuration file. On Android 8.1, this is located at `/data/misc/bluedroid/bt_config.conf`.
-The `LE_LOCAL_KEY_IRK` specifies the Android device's own IRK, and the first 16
-bytes of `LE_KEY_PID` for every bonded device in the file indicate the bonded
-device's IRK. Be aware that keys stored in this file are little endian, so
-**the byte order of keys in this file will need to be reversed.** For example,
-the little endian IRK 22BC0E3F2EACF08EE36B865553EA0B4E needs to be changed to
-4E0BEA5355866BE38EF0AC2E3F0EBC22 (big endian) when being passed to Sniffle with
-the `-i` option.
-
-You can also find the IRK and LTK through HCI Snoop logs captured on Android or iOS
-without rooting the device:
-
-* Android: <https://novelbits.s3.us-east-2.amazonaws.com/Developer+Guides/Android+Bluetooth+Debugging+Guide.pdf>
-* iOS: <https://novelbits.s3.us-east-2.amazonaws.com/Developer+Guides/iOS+Bluetooth+Debugging+Guide.pdf>
-
-## Wireshark Plugin
-
-Sniffle includes a Wireshark plugin that makes it possible to launch Sniffle automatically
-from the Wireshark GUI by selecting the 'Sniffle' capture interface.
-
-To install the Sniffle plugin, first find the location of your Personal Extcap folder in the
-'About Wireshark' dialog (*Help* > *About Wireshark* > *Folders* > *Personal Extcap path*).
-On POSIX (Linux and Mac OS) systems running recent versions of Wireshark (4.2.0+), this
-folder is located at `~/.local/lib/wireshark/extcap`. Under Windows, it can be found at
-`%USERPROFILE%\AppData\Roaming\Wireshark\extcap`.
-
-On POSIX systems, you can just symlink the Sniffle extcap plugin into the Wireshark personal
-extcap directory:
-
-```
-mkdir -p ~/.local/lib/wireshark/extcap
-ln -s $(pwd)/python_cli/sniffle_extcap.py ~/.local/lib/wireshark/extcap
+# 方式 B：命令行指定密钥
+python3 att-fuzz/runner.py --target ... --impersonate \
+  --bt-keys bt_keys/vivo.conf --keys-mac 64:44:7B:EE:41:F4 --phone-mac 00:C3:0A:02:6C:24
 ```
 
-On Mac OS, Wireshark may try to use the Xcode Python rather than the Python in your PATH specified
-by your shell profile. Thus, the Sniffle plugin may fail to show up in extcap interfaces if PySerial
-is not installed for the Xcode Python. To fix this, you can edit the shebang line of
-`sniffle_extcap.py` to directly point to the Python with PySerial installed, for example the
-Homebrew Python at `/opt/homebrew/bin/python3`, rather than `/usr/bin/env python3`.
+产物：`fuzz_ledger.jsonl`（语料台账）+ `impersonation_ledger.jsonl`（握手/连接事件）+ `capture.pcap` + `gatt_enc.json`。
 
-On Windows, you can copy the following files and directories from the `python_cli` directory into
-your Personal Extcap folder:
+### 模式 2b：扫描手机自动填档案（`--scan-btconfig`）
 
-```
-sniffle/
-sniffle_extcap.py
-sniffle_extcap.bat
+插手机 USB + root，adb 拉取 bt_config.conf，列出所有 bond 设备，自动生成含 mac/phone_mac/ltk 的 target JSON：
+
+```bash
+python3 att-fuzz/runner.py --scan-btconfig --adb-serial <序列号>
+python3 att-fuzz/runner.py --scan-btconfig --save-target vivo_tws   # 保存档案
 ```
 
-On Windows, it may be necessary to edit `sniffle_extcap.bat` to specify the location of
-the python interpreter if the installation directory is not included in the PATH, e.g.:
+GUI 冒充模式也有"扫描手机"按钮（adb-serial 输入 + 结果下拉 → 自动填编辑器）。
 
-```
-@echo off
-C:\my_python_install\python.exe "%~dp0sniffle_extcap.py" %*
-```
+### 模式 3：反向角色（`--server`）
 
-Once the plugin has been installed, restart Wireshark or choose *Capture* > *Refresh Interfaces*
-to enable the Sniffle interface.
+板子伪装 GATT server 广播，手机连入后回正常响应，logcat oracle 检测手机侧崩溃：
 
-## Transmit Functionality
-
-While the original 2019 Sniffle firmware was purely a passive listener, later firmware versions
-added various features to actively transmit packets in various ways. Current Sniffle firmware
-supports acting as both a GAP central and peripheral device, including active scanning, legacy
-and extended advertising, initiating connections, and being connected in a central or
-peripheral role. The `scanner.py` script performs active scanning. The `initiator.py`
-script initiates a connection to a peripheral and then acts as a connected central. The
-`advertiser.py` script performs legacy advertising and accepts connection requests from other
-devices, transitioning to a connected peripheral role.
-
-The transmit functionality of Sniffle is a little different from a traditional HCI-based Bluetooth
-controller, because it gives you very low level control of the exact PDUs being sent at the link
-layer. This low-level control allows the host-side code to implement additional functionality,
-such as link layer fuzz testing or link layer relay attacks.
-
-I have not yet taken the time to formally document the Sniffle firmware's API, though it is fairly
-self-explanatory when looking at its host-side implementation in `sniffle_hw.py`. Active scanning
-(that transmits scan requests) is activated by `cmd_scan`. Connection initiation is triggered by
-`cmd_connect`, though it's easiest to use the `initiate_conn` wrapper. Advertising (optionally
-connectable) is activated by `cmd_advertise` for legacy advertising, or `cmd_advertise_ext` for
-extended advertising.
-
-## XDS110 UART Latency
-
-Since the fixing of TI issue [EXT_EP-11735](https://sir.ext.ti.com/jira/browse/EXT_EP-11735) in
-mid-2024, the XDS110 debugger (included on TI Launchpad boards) handles high baud rates such as
-2M (as used by Sniffle) in a reasonable manner without excessive latency. However, the latest
-XDS110 firmware still uses buffered DMA-driven operation of UART at such baud rates, and as
-such can still introduce latency up to 30 ms. This latency is inconsequential for use as a sniffer,
-but may be detrimental to more active operations such as host-side code acting as a GATT client
-or server, or performing relay attacks. The modification of XDS110 firmware version 3.0.0.28
-desrcribed below for interrupt-based operation can still greatly reduce latency for such
-time-sensitive operations. It should be possible to make a similar modification to the latest
-XDS110 firmware, but I haven't taken the time to reverse engineer it and find the right bits
-to change.
-
-In mid-2024 and earlier, the firmware of the TI XDS110 debugger (included on Launchpad boards)
-had an undesirable behaviour in its USB to UART bridge, where at high baud rates, there can be severe
-latency, especially with frequent small writes as done by the Sniffle firmware. This issue was
-present for years, and was still present in April 2024 with the XDS110 firmware 3.0.0.28
-bundled with UniFlash 8.6.0. The root cause was that in DMA based operation, the XDS110 firmware
-accumulated UART data in a buffer whose size was proportional to baud rate, and waited for this
-buffer to fill before transferring the data. There was logic to flush this buffer if no new data
-arrived over the last 15 milliseconds, but this flushing logic was never triggered when Sniffle
-was frequently adding small packets from connection events every few milliseconds. As a result of
-this suboptimal behaviour, sniffed data could appear in delayed bursts on the host.
-
-The XDS110 firmware also has an alternate mode for UART operation, where every UART receive
-triggers an interrupt that results in data immediately being passed to the host. This
-interrupt-based mode of operation has much lower latency. However, the firmware only uses it for
-baud rates below 230400. As a workaround to the high latency of DMA mode operation with frequent
-small data chunks, you can modify the firmware to use interrupt-based USB-UART bridging even at
-high baud rates (like 2M baud as used by Sniffle). In firmware 3.0.0.28 (included with Uniflash
-8.6.0), you can hex edit the bytes at offset 0x0A14 from 61 3F to 00 1F. This will change the
-baud rate for switching to DMA-based UART operation from 230400 to 0x200000 (2097152).
-
-Be aware that the offsets and byte modifications described above are only for firmware 3.0.0.28,
-and will be different for different firmware versions. Flashing invalid firmware onto your debugger
-may damage it, and we assume no responsibility for any damage that may occur.
-
-The following commands can be used on Linux to modify the XDS110 firmware for low latency UART
-at high baud rates:
-
-```
-cd ~/ti/uniflash_8.6.0/deskdb/content/TICloudAgent/linux/ccs_base/common/uscif/xds110/
-cp firmware_3.0.0.28.bin firmware_3.0.0.28_fastuart.bin
-printf '\x00\x1f' | dd of=firmware_3.0.0.28_fastuart.bin bs=1 seek=$((0x0A14)) conv=notrunc
-sha256sum firmware_3.0.0.28_fastuart.bin
+```bash
+python3 att-fuzz/runner.py --target ... --server \
+  --server-name "Sniffle Server" --server-duration 300 --adb-serial <序列号>
 ```
 
-Before flashing, verify that the SHA256 sum of the modified firmware is
-`c226f2e9cb2b9f0bc111ca11f2903d58d4065293468623428c0e8eeb22086dcf`. After verifying this,
-run the following commands to flash the modified XDS110 debugger firmware:
+产物：`server_ledger.jsonl` + `crashes/`（oracle 命中落盘）。
 
-```
-./xdsdfu -m
-./xdsdfu -f firmware_3.0.0.28_fastuart.bin -r
-```
+### 模式 4：被动嗅探配对（`--sniff-pairing`）
 
-## Relaying Link Layer Traffic
+嗅探 SMP 交换 → legacy 密钥推导：
 
-Sniffle can be used to perform [link-layer relaying](https://hardwear.io/netherlands-2022/presentation/bluetooth-LE-link-layer-relay-attacks.pdf)
-of Bluetooth LE traffic. When performing relaying, one Sniffle device acts as a
-BLE central (using `relay_master.py`) and a second Sniffle deice acts as a BLE
-peripheral (using `relay_slave.py`). Master and slave are historic terms for BLE
-central and peripheral respectively. The relay master captures advertising and
-scan response data from the genuine peripheral, then passes it to the relay slave.
-The relay slave transmits advertisements and scan responses mimicking the genuine
-peripheral and accepts connections. Upon accepting a connection, the relay slave
-notifies the relay master, which then initiates a connection to the genuine
-peripheral. From this point onwards, all link layer packets are forwarded
-between the relay master and slave.
-
-The relay master script provides functionality to request faster connection
-intervals on one both sides of the relay to reduce latency. If using the XDS110
-as a USB/UART bridge, be aware that the XDS110 firmware introduces additional
-latency to the relay unless you modify it as described above.
-
-Please note that the relay master script creates a network listener that binds
-to all interfaces (0.0.0.0), and the network protocol used to communicate
-between the relaying devices provides no security. Only use these scripts in
-trusted network environments.
-
-Usage of the relay master (central) and slave (peripheral) scripts is shown below.
-At present, extended advertising is not supported by the relay scripts.
-
-```
-usage: relay_master.py [-h] [-s SERPORT] [-c {37,38,39}] [-m MAC] [-i IRK] [-S STRING]
-                       [-P] [-q] [-Q PRELOAD] [-f] [-p] [-F] [-o OUTPUT]
-
-Relay master script for Sniffle BLE5 sniffer
-
-options:
-  -h, --help            show this help message and exit
-  -s, --serport SERPORT
-                        Sniffer serial port name
-  -c, --advchan {37,38,39}
-                        Advertising channel to listen on
-  -m, --mac MAC         Specify target MAC address
-  -i, --irk IRK         Specify target IRK
-  -S, --string STRING   Specify target by advertisement search string
-  -P, --public          Supplied MAC address is public
-  -q, --quiet           Don't show empty packets
-  -Q, --preload PRELOAD
-                        Preload expected encrypted connection parameter changes
-  -f, --fastslave       Relay slave should request a fast connection interval
-  -p, --pause           Wait for key press on master before relaying
-  -F, --fastmaster      Relay master should specify a fast connection interval
-  -o, --output OUTPUT   PCAP output file name
+```bash
+python3 att-fuzz/runner.py --sniff-pairing --sniff-mac <MAC> --phone-mac <MAC> [--sniff-hold]
 ```
 
-```
-usage: relay_slave.py [-h] [-s SERPORT] [-M MASTERADDR] [-q]
+### 模式 5：离线 pcap 解密（`--decrypt`）
 
-Relay slave script for Sniffle BLE5 sniffer
+加密 BLE pcap + LTK → ATT/SMP 明文，不碰硬件：
 
-options:
-  -h, --help            show this help message and exit
-  -s, --serport SERPORT
-                        Sniffer serial port name
-  -M, --masteraddr MASTERADDR
-                        IP address of relay master
-  -q, --quiet           Don't show empty packets
+```bash
+python3 att-fuzz/runner.py --decrypt capture.pcap --bt-keys bt_keys/vivo.conf --keys-mac <MAC>
+python3 att-fuzz/runner.py --decrypt capture.pcap --ltk <32-hex>   # 直接给 LTK
 ```
+
+LTK 字节序：bt_config dump 序（小端）需整体反转才是密码学大端序，引擎自动双序尝试、MIC 裁定。产物：`decrypt_report.json` + `decrypted_sdu.jsonl`。
+
+---
+
+## 攻击面与语料
+
+| 层 | 文件 | 内容 |
+|---|---|---|
+| ① opcode | `strategies/opcodes.yaml` | 保留 opcode、合法\|0x40/0x80 翻转、0xE0-0xFF 原始注入 |
+| ② handle | `strategies/handles.yaml` | 0x0000/0xFFFF/边界、真实 handle ±1、发现类 start>end |
+| ③ value | `strategies/values.yaml` | 长度 0/1/20/MTU±N × 内容模式 |
+| ④ offset | `strategies/offsets.yaml` | 0/1/baseline±1、0x7FFF/0x8000/0xFFFF |
+| ⑤ MTU 协商 | `strategies/state_machine.yaml` | 未协商/重协商到极小值（稳定损害） |
+| ⑥ Prepare 队列 | `strategies/prepare_execute.yaml` | 队列灌满/空队列 Execute/混合 offset/非法 flags |
+| ⑦ CCCD | `strategies/cccd.yaml` | 无 2902 特征写 0x0100、值集单发 |
+| ⑧ 发现类 | `strategies/discovery.yaml` + `strategies/l2cap.yaml` | Read By Group/Type 越界、L2CAP 帧头欺骗 |
+
+语料锚点：`${each.value}` / `${each.decl}` / `${each.cccd}` / `${mtu-3}` / `${baseline_len+1}` 等，配合 `filter: writable|readable` 按 GATT 地图自动展开。**同 seed 同 GATT 地图 → 语料完全确定**（复现靠它）。
+
+变异引擎（`--rounds N`）：签名库驱动（`logs/signatures.json`），4 类算子（位翻转/字节插入/值替换/时序门控），能量加权（告警层优先）。
+
+---
+
+## 输出产物
+
+| 文件 | 内容 |
+|---|---|
+| `ledger.jsonl` | 直连 fuzz 每用例一行（case_id/分类/opcode/handle/replay.pdu） |
+| `fuzz_ledger.jsonl` | 加密冒充语料台账（格式同 ledger.jsonl） |
+| `impersonation_ledger.jsonl` | 冒充事件流（bond_loaded/enc_engaged/conn_start/link_drop） |
+| `server_ledger.jsonl` | 反向角色"手机请求→我方响应"对 |
+| `capture.pcap` | 全量 LL 无线包（DLT 256，Wireshark 打开） |
+| `transport.jsonl` | 传输层原始事件 |
+| `gatt_map.json` / `gatt_enc.json` | 发现/加密链路 GATT 地图 |
+| `crashes/` | logcat oracle 命中的崩溃窗口 |
+
+**分类含义**：
+
+| 分类 | 含义 | 动作 |
+|---|---|---|
+| `OK_RESPONSE` | 正常响应 | 无 |
+| `ERROR_RESPONSE` | ATT Error Response | 无 |
+| `TIMEOUT` | 超时无响应 | 关注 |
+| `DISCONNECT_TERM` | 目标发 TERMINATE（**reason=0x08 是"栈崩了"强信号**） | 立即复现 |
+| `DISCONNECT_SUP` | 目标静默（supervision timeout） | 复现 |
+| `TX_QUEUE_FULL` | 传输层错误，用例无效 | 重跑 |
+| `HEALTH_DEGRADED` | 后置健康检查异常 | 重点看 |
+| `ATT_FREEZE` | ATT 层冻结（LL 存活，重连恢复） | 立即复现——最高价值信号之一 |
+
+**崩溃分析**：看台账分类分布 → `--replay-case` 复现单条 → pcap 用 marker 定位帧 → 最小化。
+
+---
+
+## 原版 Sniffle 工具
+
+在 `python_cli/` 下，与 fuzzer 共享库但独立运行，串口锁同样约束：
+
+| 工具 | 用途 | 示例 |
+|---|---|---|
+| `sniff_receiver.py` | 主力嗅探器（广播+连接→pcap） | `python3 python_cli/sniff_receiver.py -c 37 -m <MAC> -o cap.pcap` |
+| `scanner.py` | 主动扫描器（发 SCAN_REQ，表格输出） | `python3 python_cli/scanner.py -c 37` |
+| `initiator.py` | 连接发起测试 | `python3 python_cli/initiator.py -m <MAC>` |
+| `relay_master.py`+`relay_slave.py` | 双板 relay MITM | 见 `python_cli/` 源码头部注释 |
+| `advertiser.py` | 广播测试 | `python3 python_cli/advertiser.py` |
+| `pcap_decoder.py` | pcap 离线解码（不解密） | `python3 python_cli/pcap_decoder.py cap.pcap` |
+| `sniffle_extcap.py` | Wireshark extcap 插件 | 加入 Wireshark extcap 目录 |
+| `reset.py` | 固件复位 | `python3 python_cli/reset.py` |
+| `version_check.py` | 固件版本检查 | `python3 python_cli/version_check.py` |
+
+---
+
+## GUI 可视化控制台（NiceGUI）
+
+```bash
+pip install nicegui
+python3 att-fuzz/gui/app.py               # 浏览器 http://localhost:8765
+python3 att-fuzz/gui/app.py --native      # 原生窗口(需 pywebview)
+python3 att-fuzz/gui_demo.py              # 离线演示(FakeHw,无硬件)
+```
+
+**四页面**：
+
+- **控制台**：串口/固件、目标档案编辑（含扫描手机按钮）、模式选择器（直连/加密冒充/反向角色）、策略横排 + seed/max-cases/rounds/round-budget、探测/发现/开始、暂停/继续/停止、GATT 树、日志
+- **实时仪表盘**：进度/速率统计卡、分类分布环形图、连接健康（含**加密状态** + **ATT 冻结计数** chip）、告警列表、传输层事件流（kind 过滤）
+- **结果与重放**：多台账自动探测、分类/层/关键词过滤、行详情、Replay ×1/×5（仅直连台账）、Markdown 导出
+- **历史会话**：run 列表、双会话分类分布对比图、摘要导出
+
+串口按任务懒占用：GUI 空闲不碰串口，CLI 可正常用；任务运行期间由锁文件互斥。
+
+---
+
+## 测试与维护
+
+### 离线测试（不需要板子，改 core 后必跑）
+
+```bash
+python3 att-fuzz/tests/test_offline.py   # 编解码/语料展开/加密/冒充握手/多台账
+python3 att-fuzz/tests/test_dryrun.py    # FakeHw 走通全流程(含 controller)
+```
+
+### 加语料
+
+`strategies/` 加 yaml（见"攻击面与语料"语法）。展开规模 = 模板数 × 命中特征数。
+
+### 换目标设备
+
+复制 `targets/<name>.json` 改参数即可。冒充目标额外填 `phone_mac` + `ltk`（或 `bt_keys`）。语料按运行时 GATT 地图自动展开，**不写死任何设备信息**。
+
+---
+
+## 常见问题
+
+| 现象 | 处理 |
+|---|---|
+| `Sniffle device not found` | 板子没插/udev 没生效；`--serport` 手动指 |
+| 连接失败且日志看不到广播 | **MAC 字节序**：固件用线序（小端），`_parse_mac` 已处理，自写脚本须自己反转 |
+| 连接失败 0x1408 | 嘈杂环境 initiator 被干扰；固件 1.12.0 补丁已处理，确认版本 |
+| 台账大量 `TIMEOUT` | 目标反应慢，`conn_interval` 调大（如 24） |
+| `HEALTH_DEGRADED` 高频 | 健康检查锚点选了动态值特征，改用 Device Name |
+| 加密冒充握手失败 | 密钥不匹配/bond 过期，重新提取 bt_config.conf |
+| ATT_FREEZE | 无害读预热到 event ~1100 触发（每连接 ATT 死锁），重连恢复 |
+| pcap 解密 MIC 全失败 | LTK 字节序/密钥不匹配；引擎自动双序尝试 |
+| GUI 冒充缺参数 | target JSON 补 `phone_mac` + `ltk`（或 `bt_keys`） |
+
+---
+
+## 许可
+
+本项目是 nccgroup/Sniffle 的分支扩展，上游版权归 NCC Group（作者 Sultan Qasim Khan），继续以 **GPLv3** 发布。
